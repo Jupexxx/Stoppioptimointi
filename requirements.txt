@@ -2,6 +2,6 @@ streamlit
 pandas
 numpy
 pyomo
-openpyxl
 pydeck
 pyproj
+openpyxl
