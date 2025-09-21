@@ -11,7 +11,6 @@ from pyomo.common.errors import ApplicationError # Tuodaan virheluokka
 # =============================================================================
 # VAKIOT JA KONFIGURAATIO
 # =============================================================================
-# ... (tämä osa pysyy täysin samana) ...
 # Excel-välilehtien nimet
 SHEET_AUTOT = 'AutojenYhteenveto'
 SHEET_JAKO = 'Jakokeikat'
@@ -41,7 +40,6 @@ LASKENTATAPA_KG = '€/kg'
 # =============================================================================
 # APUFUNKTIOT JA DATAN KÄSITTELY
 # =============================================================================
-# ... (tämä osa pysyy täysin samana) ...
 def luo_mallipohja_exceliin():
     """Luo ja palauttaa Excel-mallipohjan BytesIO-muodossa."""
     output = BytesIO()
@@ -137,7 +135,6 @@ def _valmistele_data(sheets, autot_mukana):
 # =============================================================================
 # OPTIMOINTI: TARIFFIEN LASKENTA
 # =============================================================================
-# ... (tämä osa pysyy täysin samana, mutta lisätään try-except lohko) ...
 def _luo_tariffimallin_perusrakenne(df_autot, df_tariff_input):
     model = pyo.ConcreteModel(name="TariffiOptimointi")
     model.AUTOT = pyo.Set(initialize=list(df_autot[COL_AUTOTUNNUS]))
@@ -239,14 +236,12 @@ def suorita_tariffi_optimointi(sheets, df_zones_current, autot_mukana, params):
     model = _lisaa_tariffimallin_rajoitteet(model, df_autot, df_tariff_input, vanhat_kulut_dict, params)
 
     solver = pyo.SolverFactory('cbc')
-    # --- KORJATTU KOHTA ---
     try:
         results = solver.solve(model, tee=False)
     except ApplicationError:
         error_msg = ("Ratkaisija kaatui. Tämä johtuu Streamlit Cloudissa yleensä resurssirajoituksista (RAM). "
                      "Kokeile pienemmällä datasetillä tai löysemmillä parametreilla.")
         return "virhe", error_msg, None
-    # --- KORJAUKSEN LOPPU ---
 
     if (results.solver.status == pyo.SolverStatus.ok) and (results.solver.termination_condition == pyo.TerminationCondition.optimal):
         df_tulos = df_tariff_input.copy()
@@ -314,8 +309,7 @@ def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
         model.kustannusrajoite = pyo.Constraint(rule=pyo.inequality(vanhat_kulut_yhteensä * (1 - heitto_kerroin), uudet_kulut_yhteensä, vanhat_kulut_yhteensä * (1 + heitto_kerroin)))
     
     solver = pyo.SolverFactory('cbc')
-    # --- KORJATTU KOHTA ---
-    solver.options['threads'] = 1  # Turvallisempi asetus pilviympäristöön
+    solver.options['threads'] = 1
     solver.options['ratio'] = params['vaje'] / 100.0
     try:
         results = solver.solve(model, tee=False)
@@ -323,7 +317,6 @@ def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
         error_msg = ("Ratkaisija kaatui. Tämä johtuu Streamlit Cloudissa yleensä resurssirajoituksista (RAM), "
                      "erityisesti suurilla datamäärillä. Kokeile pienemmällä datasetillä tai suurenna sallittua optimointivajetta.")
         return "virhe", error_msg, None
-    # --- KORJAUKSEN LOPPU ---
 
     if (results.solver.status == pyo.SolverStatus.ok) and (results.solver.termination_condition == pyo.TerminationCondition.optimal):
         tulokset = [{COL_POSTINUMERO: p, COL_VYOHYKE: v} for p in model.POSTINUMEROT for v in model.VYOHYKKEET if pyo.value(model.y[p,v]) > 0.9]
@@ -333,7 +326,6 @@ def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
     else: return "virhe", "Ratkaisua ei löytynyt. Kokeile löysempiä parametreja tai poista lukituksia.", None
 
 def laske_vyohykkeet_automaattisesti(df_keikat, df_pnro, paakeskus_pnro='60100'):
-    # ... (tämä osa pysyy täysin samana) ...
     df_keikat[COL_POSTINUMERO] = df_keikat[COL_POSTINUMERO].astype(str)
     df_volyymit = df_keikat.groupby(COL_POSTINUMERO).agg(Kilot_sum=(COL_KILOT, 'sum'), Rahtikirjojen_lkm=(COL_RAHTIKIRJA, 'nunique'), Nippujen_lkm=(COL_NIPPUNUMERO, 'nunique')).reset_index()
     df_pnro[COL_POSTINUMERO] = df_pnro[COL_POSTINUMERO].astype(str)
@@ -380,8 +372,7 @@ def laske_vyohykkeet_automaattisesti(df_keikat, df_pnro, paakeskus_pnro='60100')
     output_cols = [COL_POSTINUMERO, 'Uusi_Vyohyke', COL_X_KOORD, COL_Y_KOORD, 'Rahtikirjojen_lkm']
     return df_pnro_valmis[output_cols].rename(columns={'Uusi_Vyohyke': COL_VYOHYKE})
 
-# --- UUSI APUFUNKTIO PORAUTUMISNÄYTÖLLE ---
-# ... (tämä osa pysyy täysin samana) ...
+# --- APUFUNKTIO PORAUTUMISNÄYTÖLLE ---
 def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
     """Näyttää standardoidun analyysinäkymän annetulle datalle."""
     st.subheader(f"Porautumisanalyysi: {otsikko}")
@@ -409,7 +400,6 @@ def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
 # =============================================================================
 # STREAMLIT-KÄYTTÖLIITTYMÄ
 # =============================================================================
-# ... (tämä osa pysyy täysin samana) ...
 st.set_page_config(layout="wide", page_title="Rahtioptimointi")
 
 # Session State alustus
@@ -503,7 +493,6 @@ with st.sidebar:
                         original_zones[COL_POSTINUMERO] = original_zones[COL_POSTINUMERO].astype(str)
                         tulos[COL_POSTINUMERO] = tulos[COL_POSTINUMERO].astype(str)
                         new_zones_complete = pd.merge(original_zones, tulos, on=COL_POSTINUMERO, how='left')
-                        # Säilytetään lukitut arvot optimoinnin yli
                         for pnro, vyohyke in st.session_state.lukitut_vyohykkeet.items():
                              new_zones_complete.loc[new_zones_complete[COL_POSTINUMERO] == pnro, COL_VYOHYKE] = vyohyke
                         st.session_state.df_zones_current = new_zones_complete
@@ -551,7 +540,6 @@ if not edited_tariff.equals(st.session_state.df_tariff_current):
         for c_name in vyohyke_cols:
             orig_val = st.session_state.df_tariff_current.at[r_idx, c_name]
             new_val = row[c_name]
-            # Varmistetaan, että vertailu toimii myös NaN arvojen kanssa
             if pd.notna(new_val) and (pd.isna(orig_val) or not np.isclose(float(new_val), float(orig_val))):
                 muutokset[(r_idx, c_name)] = float(new_val)
     
