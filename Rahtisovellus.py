@@ -6,10 +6,12 @@ from io import BytesIO
 import time
 import pydeck as pdk
 from pyproj import Transformer
+from pyomo.common.errors import ApplicationError # Tuodaan virheluokka
 
 # =============================================================================
 # VAKIOT JA KONFIGURAATIO
 # =============================================================================
+# ... (tämä osa pysyy täysin samana) ...
 # Excel-välilehtien nimet
 SHEET_AUTOT = 'AutojenYhteenveto'
 SHEET_JAKO = 'Jakokeikat'
@@ -39,7 +41,7 @@ LASKENTATAPA_KG = '€/kg'
 # =============================================================================
 # APUFUNKTIOT JA DATAN KÄSITTELY
 # =============================================================================
-
+# ... (tämä osa pysyy täysin samana) ...
 def luo_mallipohja_exceliin():
     """Luo ja palauttaa Excel-mallipohjan BytesIO-muodossa."""
     output = BytesIO()
@@ -135,7 +137,7 @@ def _valmistele_data(sheets, autot_mukana):
 # =============================================================================
 # OPTIMOINTI: TARIFFIEN LASKENTA
 # =============================================================================
-
+# ... (tämä osa pysyy täysin samana, mutta lisätään try-except lohko) ...
 def _luo_tariffimallin_perusrakenne(df_autot, df_tariff_input):
     model = pyo.ConcreteModel(name="TariffiOptimointi")
     model.AUTOT = pyo.Set(initialize=list(df_autot[COL_AUTOTUNNUS]))
@@ -237,7 +239,14 @@ def suorita_tariffi_optimointi(sheets, df_zones_current, autot_mukana, params):
     model = _lisaa_tariffimallin_rajoitteet(model, df_autot, df_tariff_input, vanhat_kulut_dict, params)
 
     solver = pyo.SolverFactory('cbc')
-    results = solver.solve(model, tee=False)
+    # --- KORJATTU KOHTA ---
+    try:
+        results = solver.solve(model, tee=False)
+    except ApplicationError:
+        error_msg = ("Ratkaisija kaatui. Tämä johtuu Streamlit Cloudissa yleensä resurssirajoituksista (RAM). "
+                     "Kokeile pienemmällä datasetillä tai löysemmillä parametreilla.")
+        return "virhe", error_msg, None
+    # --- KORJAUKSEN LOPPU ---
 
     if (results.solver.status == pyo.SolverStatus.ok) and (results.solver.termination_condition == pyo.TerminationCondition.optimal):
         df_tulos = df_tariff_input.copy()
@@ -303,8 +312,19 @@ def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
     else:
         vanhat_kulut_yhteensä = df_autot[COL_VANHAT_KULUT].sum(); uudet_kulut_yhteensä = sum(model.uusi_kustannus_per_auto[a] for a in model.AUTOT)
         model.kustannusrajoite = pyo.Constraint(rule=pyo.inequality(vanhat_kulut_yhteensä * (1 - heitto_kerroin), uudet_kulut_yhteensä, vanhat_kulut_yhteensä * (1 + heitto_kerroin)))
-    solver = pyo.SolverFactory('cbc'); solver.options['threads'] = -1; solver.options['ratio'] = params['vaje'] / 100.0
-    results = solver.solve(model, tee=False)
+    
+    solver = pyo.SolverFactory('cbc')
+    # --- KORJATTU KOHTA ---
+    solver.options['threads'] = 1  # Turvallisempi asetus pilviympäristöön
+    solver.options['ratio'] = params['vaje'] / 100.0
+    try:
+        results = solver.solve(model, tee=False)
+    except ApplicationError:
+        error_msg = ("Ratkaisija kaatui. Tämä johtuu Streamlit Cloudissa yleensä resurssirajoituksista (RAM), "
+                     "erityisesti suurilla datamäärillä. Kokeile pienemmällä datasetillä tai suurenna sallittua optimointivajetta.")
+        return "virhe", error_msg, None
+    # --- KORJAUKSEN LOPPU ---
+
     if (results.solver.status == pyo.SolverStatus.ok) and (results.solver.termination_condition == pyo.TerminationCondition.optimal):
         tulokset = [{COL_POSTINUMERO: p, COL_VYOHYKE: v} for p in model.POSTINUMEROT for v in model.VYOHYKKEET if pyo.value(model.y[p,v]) > 0.9]
         df_tulos = pd.DataFrame(tulokset)
@@ -313,6 +333,7 @@ def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
     else: return "virhe", "Ratkaisua ei löytynyt. Kokeile löysempiä parametreja tai poista lukituksia.", None
 
 def laske_vyohykkeet_automaattisesti(df_keikat, df_pnro, paakeskus_pnro='60100'):
+    # ... (tämä osa pysyy täysin samana) ...
     df_keikat[COL_POSTINUMERO] = df_keikat[COL_POSTINUMERO].astype(str)
     df_volyymit = df_keikat.groupby(COL_POSTINUMERO).agg(Kilot_sum=(COL_KILOT, 'sum'), Rahtikirjojen_lkm=(COL_RAHTIKIRJA, 'nunique'), Nippujen_lkm=(COL_NIPPUNUMERO, 'nunique')).reset_index()
     df_pnro[COL_POSTINUMERO] = df_pnro[COL_POSTINUMERO].astype(str)
@@ -360,6 +381,7 @@ def laske_vyohykkeet_automaattisesti(df_keikat, df_pnro, paakeskus_pnro='60100')
     return df_pnro_valmis[output_cols].rename(columns={'Uusi_Vyohyke': COL_VYOHYKE})
 
 # --- UUSI APUFUNKTIO PORAUTUMISNÄYTÖLLE ---
+# ... (tämä osa pysyy täysin samana) ...
 def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
     """Näyttää standardoidun analyysinäkymän annetulle datalle."""
     st.subheader(f"Porautumisanalyysi: {otsikko}")
@@ -387,6 +409,7 @@ def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
 # =============================================================================
 # STREAMLIT-KÄYTTÖLIITTYMÄ
 # =============================================================================
+# ... (tämä osa pysyy täysin samana) ...
 st.set_page_config(layout="wide", page_title="Rahtioptimointi")
 
 # Session State alustus
@@ -540,7 +563,6 @@ if not edited_tariff.equals(st.session_state.df_tariff_current):
 if st.session_state.lukitut_tariffit:
     with st.expander(f"Aktiiviset tariffilukitukset ({len(st.session_state.lukitut_tariffit)} kpl)"):
         for (r, c) in list(st.session_state.lukitut_tariffit.keys()):
-            # Asetetaan teksti ja nappi vierekkäin ilman st.columns-kutsua
             col1, col2 = st.columns([0.8, 0.2])
             with col1:
                 v = st.session_state.lukitut_tariffit[(r,c)]
@@ -584,7 +606,6 @@ with col1:
         for _, row in muuttuneet_rivit.iterrows():
             st.session_state.lukitut_vyohykkeet[row[COL_POSTINUMERO]] = row['uusi_vyohyke']
         
-        # Päivitetään päätaulukko turvallisesti
         vyohyke_updates = edited_zones.set_index(COL_POSTINUMERO)[COL_VYOHYKE]
         df_to_update = st.session_state.df_zones_current.set_index(COL_POSTINUMERO)
         df_to_update.update(vyohyke_updates)
@@ -596,9 +617,6 @@ with col1:
     if st.session_state.lukitut_vyohykkeet:
         with st.expander(f"Aktiiviset vyöhykelukitukset ({len(st.session_state.lukitut_vyohykkeet)} kpl)"):
             for pnro in list(st.session_state.lukitut_vyohykkeet.keys()):
-                # --- KORJATTU KOHTA ---
-                # Käytetään st.columns, koska se on vakaampi kuin aiemmin luulin.
-                # Aiempi ongelma johtui datan käsittelystä, ei tästä.
                 col_text, col_button = st.columns([4, 1])
                 with col_text:
                     v = st.session_state.lukitut_vyohykkeet[pnro]
