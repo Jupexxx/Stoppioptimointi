@@ -5,3 +5,4 @@ pyomo
 pydeck
 pyproj
 openpyxl
+matplotlib
