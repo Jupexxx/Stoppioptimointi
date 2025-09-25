@@ -132,6 +132,52 @@ def _valmistele_data(sheets, autot_mukana):
     df_niput[COL_POSTINUMERO] = df_niput[COL_POSTINUMERO].astype(str)
     return df_autot, df_niput, sheets[SHEET_TARIFFI]
 
+# --- MUUTETTU KOHTA: UUSI FUNKTIO HINNAN MONOTONISUUDEN VARMISTAMISEKSI ---
+def laske_oikea_nippu_hinta(row, df_tariff_current, df_tariff_orig):
+    """Laskee nipulle hinnan ja varmistaa, ettei hinta putoa painoluokan vaihtuessa."""
+    paino = row['nippu_paino']
+    vyohyke = row['Vyöhyke']
+    vyohyke_sarake = f"{PREFIX_VYOHYKE_COL} {vyohyke}"
+
+    # Etsi oikea tariffirivi
+    rivi_idx = get_painoluokka_rivi_idx(paino, df_tariff_orig)
+    if rivi_idx is None:
+        return 0.0
+
+    # Hae nykyisen luokan tiedot
+    nykyinen_rivi = df_tariff_orig.loc[rivi_idx]
+    laskentatapa = nykyinen_rivi[COL_LASKENTATAPA]
+    hinta = df_tariff_current.at[rivi_idx, vyohyke_sarake]
+    
+    # Laske raakahinta
+    raakahinta = paino * hinta if laskentatapa == LASKENTATAPA_KG else hinta
+
+    # Jos olemme ensimmäisellä rivillä, ei ole edellistä luokkaa, johon verrata
+    if rivi_idx == 0:
+        return raakahinta
+
+    # Hae edellisen rivin tiedot vertailua varten
+    edellinen_rivi_idx = rivi_idx - 1
+    edellinen_rivi = df_tariff_orig.loc[edellinen_rivi_idx]
+    edellinen_loppu_kg = edellinen_rivi[COL_PAINO_LOPPU]
+    edellinen_laskentatapa = edellinen_rivi[COL_LASKENTATAPA]
+    edellinen_hinta = df_tariff_current.at[edellinen_rivi_idx, vyohyke_sarake]
+
+    # Jos nykyinen luokka on kg-pohjainen, lasketaan edellisen luokan maksimihinta
+    # ja käytetään sitä lattiahintana.
+    if pd.notna(edellinen_loppu_kg):
+        # Laske edellisen tason maksimihinta (vertailuhinta)
+        if edellinen_laskentatapa == LASKENTATAPA_KG:
+            vertailuhinta = edellinen_loppu_kg * edellinen_hinta
+        else: # €/nippu
+            vertailuhinta = edellinen_hinta
+        
+        # Palauta suurempi: joko raakahinta tai edellisen tason maksimihinta
+        return max(raakahinta, vertailuhinta)
+    
+    return raakahinta
+# --- MUUTOKSEN LOPPU ---
+
 # =============================================================================
 # OPTIMOINTI: TARIFFIEN LASKENTA
 # =============================================================================
@@ -400,6 +446,7 @@ def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
 # =============================================================================
 # STREAMLIT-KÄYTTÖLIITTYMÄ
 # =============================================================================
+# ... (loput koodista pysyy täysin samana, lukuunottamatta yhtä kohtaa) ...
 st.set_page_config(layout="wide", page_title="Rahtioptimointi")
 
 # Session State alustus
@@ -565,15 +612,24 @@ st.subheader("Nykyinen vyöhykemalli")
 col1, col2 = st.columns([0.4, 0.6])
 with col1:
     df_zones_display = st.session_state.df_zones_current.copy()
-    if COL_POSTITOIMIPAIKKA not in df_zones_display.columns:
-         df_zones_display = pd.merge(df_zones_display, st.session_state.sheets[SHEET_PNRO][[COL_POSTINUMERO, COL_POSTITOIMIPAIKKA]].astype(str), on=COL_POSTINUMERO, how='left')
     
-    if 'Rahtikirjojen_lkm' not in df_zones_display.columns:
-        df_keikat_temp = pd.concat([st.session_state.sheets[SHEET_JAKO], st.session_state.sheets[SHEET_NOUTO]], ignore_index=True)
-        df_keikat_temp[COL_POSTINUMERO] = df_keikat_temp[COL_POSTINUMERO].astype(str)
-        rk_lkm = df_keikat_temp.groupby(COL_POSTINUMERO)[COL_RAHTIKIRJA].nunique().reset_index(name='Rahtikirjojen_lkm')
+    if COL_POSTITOIMIPAIKKA not in df_zones_display.columns:
+        df_pnro_orig = st.session_state.sheets[SHEET_PNRO].copy()
+        df_pnro_orig[COL_POSTINUMERO] = df_pnro_orig[COL_POSTINUMERO].astype(str)
         df_zones_display[COL_POSTINUMERO] = df_zones_display[COL_POSTINUMERO].astype(str)
-        df_zones_display = pd.merge(df_zones_display, rk_lkm, on=COL_POSTINUMERO, how='left').fillna({'Rahtikirjojen_lkm': 0})
+        df_zones_display = pd.merge(df_zones_display, df_pnro_orig[[COL_POSTINUMERO, COL_POSTITOIMIPAIKKA]], on=COL_POSTINUMERO, how='left')
+
+    df_keikat_temp = pd.concat([st.session_state.sheets[SHEET_JAKO], st.session_state.sheets[SHEET_NOUTO]], ignore_index=True)
+    
+    df_keikat_temp[COL_POSTINUMERO] = df_keikat_temp[COL_POSTINUMERO].astype(str)
+    df_zones_display[COL_POSTINUMERO] = df_zones_display[COL_POSTINUMERO].astype(str)
+
+    rk_lkm = df_keikat_temp.groupby(COL_POSTINUMERO)[COL_RAHTIKIRJA].nunique().reset_index(name='Rahtikirjojen_lkm')
+    
+    if 'Rahtikirjojen_lkm' in df_zones_display.columns:
+        df_zones_display = df_zones_display.drop(columns=['Rahtikirjojen_lkm'])
+        
+    df_zones_display = pd.merge(df_zones_display, rk_lkm, on=COL_POSTINUMERO, how='left').fillna({'Rahtikirjojen_lkm': 0})
     
     display_cols = [COL_POSTINUMERO, COL_POSTITOIMIPAIKKA, COL_VYOHYKE, 'Rahtikirjojen_lkm']
     for col in display_cols:
@@ -687,10 +743,15 @@ if not st.session_state.vertailu_auto.empty:
         df_niput_tulokset = df_niput_tulokset[df_niput_tulokset[COL_VYOHYKE].isin(valid_vyohykkeet)]
 
         if not df_niput_tulokset.empty:
+            # --- MUUTETTU KOHTA: KÄYTETÄÄN UUTTA FUNKTIOTA ---
+            df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
             df_niput_tulokset['Uusi_nippu_hinta'] = df_niput_tulokset.apply(
-                lambda r: r['nippu_paino'] * st.session_state.df_tariff_current.at[int(r['tariffi_rivi_idx']), f"{PREFIX_VYOHYKE_COL} {r[COL_VYOHYKE]}"] 
-                if st.session_state.sheets[SHEET_TARIFFI].at[int(r['tariffi_rivi_idx']), COL_LASKENTATAPA] == LASKENTATAPA_KG 
-                else st.session_state.df_tariff_current.at[int(r['tariffi_rivi_idx']), f"{PREFIX_VYOHYKE_COL} {r[COL_VYOHYKE]}"], axis=1)
+                laske_oikea_nippu_hinta,
+                axis=1,
+                df_tariff_current=st.session_state.df_tariff_current,
+                df_tariff_orig=df_tariff_orig
+            )
+            # --- MUUTOKSEN LOPPU ---
 
         col1_drill, col2_drill = st.columns(2)
         with col1_drill:
