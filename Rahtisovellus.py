@@ -767,13 +767,20 @@ if not st.session_state.vertailu_auto.empty:
     
     df_naytettava = edited_autot[edited_autot['Mukana']]
     if not df_naytettava.empty:
-        # --- MUUTETTU KOHTA: Tulosten laskenta ja tallennus session stateen ---
+               # --- KORJATTU KOHTA: Tulosten laskenta ja tallennus session stateen ---
         df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
         _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, list(autot_nyt_mukana))
-        # Varmistetaan, että 'nippu_paino' on mukana df_niput_base:ssa
+        
         df_tulokset_yksiloity = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
         df_tulokset_yksiloity = pd.merge(df_tulokset_yksiloity, df_naytettava[[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]], on=COL_AUTOTUNNUS, how='left')
-        df_tulokset_yksiloity.rename(columns={'nippu_paino': 'Paino'}, inplace=True) # LISÄTTY TÄMÄ RIVI
+        df_tulokset_yksiloity.dropna(subset=[COL_LIIKENNOITSIJA], inplace=True)
+
+        # Käytetään ensin alkuperäistä nimeä 'nippu_paino' laskentaan
+        df_tulokset_yksiloity['tariffi_rivi_idx'] = df_tulokset_yksiloity['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_orig))
+        
+        # Nimetään sarake uudelleen 'Paino'-nimiseksi vasta kun sitä ei enää tarvita laskennassa
+        df_tulokset_yksiloity.rename(columns={'nippu_paino': 'Paino'}, inplace=True)
+        # --- KORJAUKSEN LOPPU ---
 
         
         df_tulokset_yksiloity.dropna(subset=[COL_LIIKENNOITSIJA], inplace=True) # Varmistetaan, että vain valitut autot ovat mukana
