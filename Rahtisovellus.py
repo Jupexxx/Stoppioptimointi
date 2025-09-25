@@ -446,14 +446,14 @@ def laske_erittely_data(sheets, df_tulokset_niput, autot_mukana):
     df_kaikki_keikat = pd.concat([df_jako, df_nouto], ignore_index=True)
     df_kaikki_keikat = df_kaikki_keikat[df_kaikki_keikat[COL_AUTOTUNNUS].isin(autot_mukana)]
 
-    # Yhdistetään nippujen hinnat yksittäisiin keikkoihin
+    # Yhdistetään nippujen hinnat JA PAINOT yksittäisiin keikkoihin
     df_erittely = pd.merge(
         df_kaikki_keikat,
-        df_tulokset_niput[[COL_NIPPUNUMERO, COL_LIIKENNOITSIJA, 'Uusi_nippu_hinta']],
+        df_tulokset_niput[[COL_NIPPUNUMERO, COL_LIIKENNOITSIJA, 'nippu_paino', 'Uusi_nippu_hinta']], # LISÄTTY 'nippu_paino'
         on=COL_NIPPUNUMERO,
         how='left'
     )
-    df_erittely.rename(columns={'Uusi_nippu_hinta': 'Hinta'}, inplace=True)
+    df_erittely.rename(columns={'Uusi_nippu_hinta': 'Hinta', 'nippu_paino': 'Paino'}, inplace=True) # LISÄTTY PAINON UUDELLEEN NIMEYS
     return df_erittely
 
 def luo_tulos_exceliin(df_tariffi, df_vyohykkeet, df_erittely):
@@ -463,7 +463,8 @@ def luo_tulos_exceliin(df_tariffi, df_vyohykkeet, df_erittely):
         df_tariffi.to_excel(writer, sheet_name='Lasketut_Tariffit', index=False)
         df_vyohykkeet.to_excel(writer, sheet_name='Lasketut_Vyohykkeet', index=False)
         
-        cols_to_show = [COL_AUTOTUNNUS, COL_LIIKENNOITSIJA, COL_NIPPUNUMERO, 'Hinta']
+        # MUOKATTU SARAKKEIDEN JÄRJESTYS
+        cols_to_show = [COL_AUTOTUNNUS, COL_LIIKENNOITSIJA, COL_NIPPUNUMERO, 'Paino', 'Hinta']
         
         df_erittely[df_erittely['Tyyppi'] == 'Jakelu'][cols_to_show].to_excel(
             writer, sheet_name='Jakelut_eritelty', index=False
@@ -769,8 +770,12 @@ if not st.session_state.vertailu_auto.empty:
         # --- MUUTETTU KOHTA: Tulosten laskenta ja tallennus session stateen ---
         df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
         _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, list(autot_nyt_mukana))
+        # Varmistetaan, että 'nippu_paino' on mukana df_niput_base:ssa
         df_tulokset_yksiloity = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
         df_tulokset_yksiloity = pd.merge(df_tulokset_yksiloity, df_naytettava[[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]], on=COL_AUTOTUNNUS, how='left')
+        df_tulokset_yksiloity.rename(columns={'nippu_paino': 'Paino'}, inplace=True) # LISÄTTY TÄMÄ RIVI
+
+        
         df_tulokset_yksiloity.dropna(subset=[COL_LIIKENNOITSIJA], inplace=True) # Varmistetaan, että vain valitut autot ovat mukana
         df_tulokset_yksiloity['tariffi_rivi_idx'] = df_tulokset_yksiloity['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_orig))
         df_tulokset_yksiloity.dropna(subset=['tariffi_rivi_idx'], inplace=True)
