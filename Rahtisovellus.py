@@ -745,6 +745,24 @@ with col2:
 
 if not st.session_state.vertailu_auto.empty:
     st.header("Laskennan tulokset")
+     # --- LISÄTTY KOHTA: Laske ja päivitä oikeat kustannukset päätaulukkoon ---
+    # 1. Laske ensin kaikkien yksittäisten nippujen oikeat hinnat
+    df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
+    _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, st.session_state.sheets[SHEET_AUTOT][COL_AUTOTUNNUS])
+    df_tulokset_yksiloity_temp = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
+    df_tulokset_yksiloity_temp[COL_VYOHYKE] = pd.to_numeric(df_tulokset_yksiloity_temp[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
+    if not df_tulokset_yksiloity_temp.empty:
+        df_tulokset_yksiloity_temp['Uusi_nippu_hinta'] = df_tulokset_yksiloity_temp.apply(
+            laske_oikea_nippu_hinta, axis=1,
+            df_tariff_current=st.session_state.df_tariff_current,
+            df_tariff_orig=df_tariff_orig
+        )
+        # 2. Laske oikeat kokonaissummat per auto
+        korjatut_summat = df_tulokset_yksiloity_temp.groupby(COL_AUTOTUNNUS)['Uusi_nippu_hinta'].sum()
+        
+        # 3. Päivitä nämä oikeat summat session stateen tallennettuun vertailutaulukkoon
+        st.session_state.vertailu_auto['Uusi kustannus (€)'] = st.session_state.vertailu_auto[COL_AUTOTUNNUS].map(korjatut_summat).fillna(0)
+    # --- LISÄtyn LOHKON LOPPU ---
     df_vertailu = st.session_state.vertailu_auto.copy()
     df_orig_autot = st.session_state.sheets[SHEET_AUTOT][[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]]
     df_vertailu = pd.merge(df_vertailu, df_orig_autot, on=COL_AUTOTUNNUS, how='left')
