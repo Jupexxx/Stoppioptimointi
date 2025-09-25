@@ -165,6 +165,42 @@ def laske_oikea_nippu_hinta(row, df_tariff_current, df_tariff_orig):
     
     return raakahinta
 
+@st.cache_data
+def laske_analyysi_data(_sheets, _df_zones_current, _df_tariff_current, _autot_mukana):
+    """Laskee kaikki analyysiin tarvittavat datat ja käyttää välimuistia suorituskyvyn parantamiseksi."""
+    df_tariff_orig = _sheets[SHEET_TARIFFI]
+    
+    # Valmistele yksittäiset niput ja laske niille oikeat, monotoniset hinnat
+    _, df_niput_base, _ = _valmistele_data(_sheets, list(_autot_mukana))
+    
+    df_zones = _df_zones_current.copy()
+    df_zones[COL_POSTINUMERO] = df_zones[COL_POSTINUMERO].astype(str)
+    
+    df_tulokset_yksiloity = pd.merge(df_niput_base, df_zones[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
+    df_tulokset_yksiloity[COL_VYOHYKE] = pd.to_numeric(df_tulokset_yksiloity[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
+
+    if not df_tulokset_yksiloity.empty:
+        df_tulokset_yksiloity['Uusi_nippu_hinta'] = df_tulokset_yksiloity.apply(
+            laske_oikea_nippu_hinta, axis=1,
+            df_tariff_current=_df_tariff_current,
+            df_tariff_orig=df_tariff_orig
+        )
+    else:
+        df_tulokset_yksiloity['Uusi_nippu_hinta'] = 0.0
+
+    # Laske korjatut kokonaissummat autoille
+    korjatut_summat = df_tulokset_yksiloity.groupby(COL_AUTOTUNNUS)['Uusi_nippu_hinta'].sum()
+    
+    # Rakenna päivitetty vertailutaulukko
+    df_autot_orig = _sheets[SHEET_AUTOT]
+    df_vertailu = pd.DataFrame({
+        COL_AUTOTUNNUS: df_autot_orig[COL_AUTOTUNNUS],
+        'Vanha kustannus (€)': df_autot_orig[COL_VANHAT_KULUT]
+    })
+    df_vertailu['Uusi kustannus (€)'] = df_vertailu[COL_AUTOTUNNUS].map(korjatut_summat).fillna(0)
+    
+    return df_vertailu, df_tulokset_yksiloity
+
 # =============================================================================
 # OPTIMOINTI: TARIFFIEN LASKENTA
 # =============================================================================
@@ -735,29 +771,17 @@ with col2:
 if 'sheets' in st.session_state and st.session_state.sheets:
     st.header("Analyysi ja tulokset")
 
-    if st.session_state.vertailu_auto.empty:
-        df_autot_orig = st.session_state.sheets[SHEET_AUTOT]
-        st.session_state.vertailu_auto = pd.DataFrame({
-            COL_AUTOTUNNUS: df_autot_orig[COL_AUTOTUNNUS],
-            'Vanha kustannus (€)': df_autot_orig[COL_VANHAT_KULUT],
-            'Uusi kustannus (€)': df_autot_orig[COL_VANHAT_KULUT]
-        })
+    # --- KORJATTU KOHTA: Kutsutaan välimuistissa olevaa funktiota raskaan laskennan sijaan ---
+    autot_kaikki = st.session_state.sheets[SHEET_AUTOT][COL_AUTOTUNNUS]
+    df_vertailu, df_tulokset_yksiloity = laske_analyysi_data(
+        st.session_state.sheets, 
+        st.session_state.df_zones_current, 
+        st.session_state.df_tariff_current,
+        tuple(autot_kaikki) # Muutettu tupleksi, jotta cache toimii
+    )
+    st.session_state.df_tulokset_yksiloity = df_tulokset_yksiloity # Tallenna analyysia varten
+    # --- KORJAUKSEN LOPPU ---
 
-    df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
-    _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, st.session_state.sheets[SHEET_AUTOT][COL_AUTOTUNNUS])
-    st.session_state.df_zones_current[COL_POSTINUMERO] = st.session_state.df_zones_current[COL_POSTINUMERO].astype(str)
-    df_tulokset_yksiloity_temp = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
-    df_tulokset_yksiloity_temp[COL_VYOHYKE] = pd.to_numeric(df_tulokset_yksiloity_temp[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
-    if not df_tulokset_yksiloity_temp.empty:
-        df_tulokset_yksiloity_temp['Uusi_nippu_hinta'] = df_tulokset_yksiloity_temp.apply(
-            laske_oikea_nippu_hinta, axis=1,
-            df_tariff_current=st.session_state.df_tariff_current,
-            df_tariff_orig=df_tariff_orig
-        )
-        korjatut_summat = df_tulokset_yksiloity_temp.groupby(COL_AUTOTUNNUS)['Uusi_nippu_hinta'].sum()
-        st.session_state.vertailu_auto['Uusi kustannus (€)'] = st.session_state.vertailu_auto[COL_AUTOTUNNUS].map(korjatut_summat).fillna(0)
-
-    df_vertailu = st.session_state.vertailu_auto.copy()
     df_orig_autot = st.session_state.sheets[SHEET_AUTOT][[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]]
     df_vertailu = pd.merge(df_vertailu, df_orig_autot, on=COL_AUTOTUNNUS, how='left')
     df_vertailu['Erotus (€)'] = df_vertailu['Uusi kustannus (€)'] - df_vertailu['Vanha kustannus (€)']
@@ -799,7 +823,7 @@ if 'sheets' in st.session_state and st.session_state.sheets:
         st.dataframe(df_liikenne, hide_index=True, use_container_width=True)
         
         st.markdown("---")
-        st.header("Porautumisanalyysi")
+        st.header("Porautumisanalyysi")        
 
         autot_nyt_mukana = set(df_naytettava[COL_AUTOTUNNUS])
         _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, list(autot_nyt_mukana))
