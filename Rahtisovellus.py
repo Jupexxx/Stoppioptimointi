@@ -779,7 +779,7 @@ if not st.session_state.vertailu_auto.empty:
         df_tulokset_yksiloity['tariffi_rivi_idx'] = df_tulokset_yksiloity['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_orig))
         
         # Nimetään sarake uudelleen 'Paino'-nimiseksi vasta kun sitä ei enää tarvita laskennassa
-        df_tulokset_yksiloity.rename(columns={'nippu_paino': 'Paino'}, inplace=True)
+        # --- kommataan virheellinen rivi df_tulokset_yksiloity.rename(columns={'nippu_paino': 'Paino'}, inplace=True)
         # --- KORJAUKSEN LOPPU ---
 
         
