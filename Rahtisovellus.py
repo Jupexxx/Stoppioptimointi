@@ -132,55 +132,63 @@ def _valmistele_data(sheets, autot_mukana):
     df_niput[COL_POSTINUMERO] = df_niput[COL_POSTINUMERO].astype(str)
     return df_autot, df_niput, sheets[SHEET_TARIFFI]
 
-# --- MUUTETTU KOHTA: UUSI FUNKTIO HINNAN MONOTONISUUDEN VARMISTAMISEKSI ---
+# --- KORJATTU JA VANKENNETTU FUNKTIO ---
 def laske_oikea_nippu_hinta(row, df_tariff_current, df_tariff_orig):
-    """Laskee nipulle hinnan ja varmistaa, ettei hinta putoa painoluokan vaihtuessa."""
+    """Laskee nipulle hinnan ja varmistaa monotonisuuden painoluokkien välillä."""
     paino = row['nippu_paino']
     vyohyke = row['Vyöhyke']
     vyohyke_sarake = f"{PREFIX_VYOHYKE_COL} {vyohyke}"
+    if vyohyke_sarake not in df_tariff_current.columns:
+        return 0.0
 
-    # Etsi oikea tariffirivi
+    # 1. Etsi nykyisen rivin indeksi ja sijainti
     rivi_idx = get_painoluokka_rivi_idx(paino, df_tariff_orig)
     if rivi_idx is None:
         return 0.0
-
-    # Hae nykyisen luokan tiedot
-    nykyinen_rivi = df_tariff_orig.loc[rivi_idx]
-    laskentatapa = nykyinen_rivi[COL_LASKENTATAPA]
-    hinta = df_tariff_current.at[rivi_idx, vyohyke_sarake]
     
-    # Laske raakahinta
+    try:
+        # get_loc löytää indeksin sijainnin (0, 1, 2...), mikä on turvallisempaa
+        rivi_sijainti = df_tariff_orig.index.get_loc(rivi_idx)
+    except KeyError:
+        return 0.0 # Turvatoimi, jos indeksiä ei löydy
+
+    # 2. Laske raakahinta nykyiselle tasolle
+    nykyinen_rivi = df_tariff_orig.iloc[rivi_sijainti]
+    laskentatapa = nykyinen_rivi[COL_LASKENTATAPA]
+    hinta = pd.to_numeric(df_tariff_current.iloc[rivi_sijainti][vyohyke_sarake], errors='coerce')
+    if pd.isna(hinta): return 0.0
+    
     raakahinta = paino * hinta if laskentatapa == LASKENTATAPA_KG else hinta
 
-    # Jos olemme ensimmäisellä rivillä, ei ole edellistä luokkaa, johon verrata
-    if rivi_idx == 0:
+    # 3. Jos ollaan ensimmäisellä rivillä, ei ole mitään mihin verrata
+    if rivi_sijainti == 0:
         return raakahinta
 
-    # Hae edellisen rivin tiedot vertailua varten
-    edellinen_rivi_idx = rivi_idx - 1
-    edellinen_rivi = df_tariff_orig.loc[edellinen_rivi_idx]
-    edellinen_loppu_kg = edellinen_rivi[COL_PAINO_LOPPU]
-    edellinen_laskentatapa = edellinen_rivi[COL_LASKENTATAPA]
-    edellinen_hinta = df_tariff_current.at[edellinen_rivi_idx, vyohyke_sarake]
-
-    # Jos nykyinen luokka on kg-pohjainen, lasketaan edellisen luokan maksimihinta
-    # ja käytetään sitä lattiahintana.
-    if pd.notna(edellinen_loppu_kg):
-        # Laske edellisen tason maksimihinta (vertailuhinta)
-        if edellinen_laskentatapa == LASKENTATAPA_KG:
-            vertailuhinta = edellinen_loppu_kg * edellinen_hinta
-        else: # €/nippu
-            vertailuhinta = edellinen_hinta
-        
-        # Palauta suurempi: joko raakahinta tai edellisen tason maksimihinta
-        return max(raakahinta, vertailuhinta)
+    # 4. Laske edellisen tason maksimihinta (lattiahinta)
+    edellinen_rivi = df_tariff_orig.iloc[rivi_sijainti - 1]
+    edellinen_loppu_kg = pd.to_numeric(edellinen_rivi[COL_PAINO_LOPPU], errors='coerce')
     
-    return raakahinta
-# --- MUUTOKSEN LOPPU ---
+    # Jos edellisellä rivillä ei ole loppupainoa, emme voi laskea vertailuhintaa
+    if pd.isna(edellinen_loppu_kg):
+        return raakahinta
+        
+    edellinen_laskentatapa = edellinen_rivi[COL_LASKENTATAPA]
+    edellinen_hinta = pd.to_numeric(df_tariff_current.iloc[rivi_sijainti - 1][vyohyke_sarake], errors='coerce')
+    if pd.isna(edellinen_hinta): return raakahinta # Jos edellinen hinta puuttuu
+
+    if edellinen_laskentatapa == LASKENTATAPA_KG:
+        lattiahinta = edellinen_loppu_kg * edellinen_hinta
+    else: # €/nippu
+        lattiahinta = edellinen_hinta
+        
+    # 5. Palauta suurempi arvo: joko raa'asti laskettu hinta tai edellisen tason maksimi
+    return max(raakahinta, lattiahinta)
+# --- KORJAUKSEN LOPPU ---
 
 # =============================================================================
 # OPTIMOINTI: TARIFFIEN LASKENTA
 # =============================================================================
+# ... (tämä osa pysyy täysin samana) ...
 def _luo_tariffimallin_perusrakenne(df_autot, df_tariff_input):
     model = pyo.ConcreteModel(name="TariffiOptimointi")
     model.AUTOT = pyo.Set(initialize=list(df_autot[COL_AUTOTUNNUS]))
@@ -446,7 +454,6 @@ def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
 # =============================================================================
 # STREAMLIT-KÄYTTÖLIITTYMÄ
 # =============================================================================
-# ... (loput koodista pysyy täysin samana, lukuunottamatta yhtä kohtaa) ...
 st.set_page_config(layout="wide", page_title="Rahtioptimointi")
 
 # Session State alustus
@@ -743,7 +750,6 @@ if not st.session_state.vertailu_auto.empty:
         df_niput_tulokset = df_niput_tulokset[df_niput_tulokset[COL_VYOHYKE].isin(valid_vyohykkeet)]
 
         if not df_niput_tulokset.empty:
-            # --- MUUTETTU KOHTA: KÄYTETÄÄN UUTTA FUNKTIOTA ---
             df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
             df_niput_tulokset['Uusi_nippu_hinta'] = df_niput_tulokset.apply(
                 laske_oikea_nippu_hinta,
@@ -751,7 +757,6 @@ if not st.session_state.vertailu_auto.empty:
                 df_tariff_current=st.session_state.df_tariff_current,
                 df_tariff_orig=df_tariff_orig
             )
-            # --- MUUTOKSEN LOPPU ---
 
         col1_drill, col2_drill = st.columns(2)
         with col1_drill:
