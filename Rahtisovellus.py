@@ -75,14 +75,6 @@ def luo_mallipohja_exceliin():
         }).to_excel(writer, sheet_name=SHEET_TARIFFI, index=False)
     return output.getvalue()
 
-def luo_tulos_exceliin(df_tariffi, df_vyohykkeet):
-    """Luo ja palauttaa tulos-Excelin, joka sisältää tariffit ja vyöhykkeet."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_tariffi.to_excel(writer, sheet_name='Lasketut_Tariffit', index=False)
-        df_vyohykkeet.to_excel(writer, sheet_name='Lasketut_Vyohykkeet', index=False)
-    return output.getvalue()
-
 def validoi_syotetiedosto(sheets):
     """Tarkistaa, että ladattu Excel sisältää kaikki tarvittavat välilehdet ja sarakkeet."""
     vaatimukset = {
@@ -141,18 +133,15 @@ def laske_oikea_nippu_hinta(row, df_tariff_current, df_tariff_orig):
     if vyohyke_sarake not in df_tariff_current.columns:
         return 0.0
 
-    # 1. Etsi nykyisen rivin indeksi ja sijainti
     rivi_idx = get_painoluokka_rivi_idx(paino, df_tariff_orig)
     if rivi_idx is None:
         return 0.0
     
     try:
-        # get_loc löytää indeksin sijainnin (0, 1, 2...), mikä on turvallisempaa
         rivi_sijainti = df_tariff_orig.index.get_loc(rivi_idx)
     except KeyError:
-        return 0.0 # Turvatoimi, jos indeksiä ei löydy
+        return 0.0
 
-    # 2. Laske raakahinta nykyiselle tasolle
     nykyinen_rivi = df_tariff_orig.iloc[rivi_sijainti]
     laskentatapa = nykyinen_rivi[COL_LASKENTATAPA]
     hinta = pd.to_numeric(df_tariff_current.iloc[rivi_sijainti][vyohyke_sarake], errors='coerce')
@@ -160,29 +149,23 @@ def laske_oikea_nippu_hinta(row, df_tariff_current, df_tariff_orig):
     
     raakahinta = paino * hinta if laskentatapa == LASKENTATAPA_KG else hinta
 
-    # 3. Jos ollaan ensimmäisellä rivillä, ei ole mitään mihin verrata
     if rivi_sijainti == 0:
         return raakahinta
 
-    # 4. Laske edellisen tason maksimihinta (lattiahinta)
-    edellinen_rivi = df_tariff_orig.iloc[rivi_sijainti - 1]
-    edellinen_loppu_kg = pd.to_numeric(edellinen_rivi[COL_PAINO_LOPPU], errors='coerce')
-    
-    # Jos edellisellä rivillä ei ole loppupainoa, emme voi laskea vertailuhintaa
-    if pd.isna(edellinen_loppu_kg):
-        return raakahinta
+    # Vertailu tehdään vain, jos nykyinen laskentatapa on €/kg, koska silloin hinta voi "pudota"
+    if laskentatapa == LASKENTATAPA_KG:
+        edellinen_rivi = df_tariff_orig.iloc[rivi_sijainti - 1]
+        edellinen_loppu_kg = pd.to_numeric(edellinen_rivi[COL_PAINO_LOPPU], errors='coerce')
         
-    edellinen_laskentatapa = edellinen_rivi[COL_LASKENTATAPA]
-    edellinen_hinta = pd.to_numeric(df_tariff_current.iloc[rivi_sijainti - 1][vyohyke_sarake], errors='coerce')
-    if pd.isna(edellinen_hinta): return raakahinta # Jos edellinen hinta puuttuu
+        if pd.notna(edellinen_loppu_kg):
+            edellinen_laskentatapa = edellinen_rivi[COL_LASKENTATAPA]
+            edellinen_hinta = pd.to_numeric(df_tariff_current.iloc[rivi_sijainti - 1][vyohyke_sarake], errors='coerce')
+            if pd.isna(edellinen_hinta): return raakahinta
 
-    if edellinen_laskentatapa == LASKENTATAPA_KG:
-        lattiahinta = edellinen_loppu_kg * edellinen_hinta
-    else: # €/nippu
-        lattiahinta = edellinen_hinta
-        
-    # 5. Palauta suurempi arvo: joko raa'asti laskettu hinta tai edellisen tason maksimi
-    return max(raakahinta, lattiahinta)
+            lattiahinta = edellinen_loppu_kg * edellinen_hinta if edellinen_laskentatapa == LASKENTATAPA_KG else edellinen_hinta
+            return max(raakahinta, lattiahinta)
+    
+    return raakahinta
 # --- KORJAUKSEN LOPPU ---
 
 # =============================================================================
@@ -451,6 +434,46 @@ def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
         st.write("**Kustannusten jakautuminen (%)**")
         st.dataframe(pivot_table_perc.style.background_gradient(cmap='Blues').format("{:.2f}%"), use_container_width=True)
 
+# --- MUUTETTU KOHTA: FUNKTIOT EXCEL-VIENTIÄ VARTEN ---
+def laske_erittely_data(sheets, df_tulokset_niput, autot_mukana):
+    """Valmistelee yksittäisten lähetysten datan Excel-vientiä varten."""
+    df_jako = sheets[SHEET_JAKO].copy()
+    df_nouto = sheets[SHEET_NOUTO].copy()
+    
+    df_jako['Tyyppi'] = 'Jakelu'
+    df_nouto['Tyyppi'] = 'Nouto'
+    
+    df_kaikki_keikat = pd.concat([df_jako, df_nouto], ignore_index=True)
+    df_kaikki_keikat = df_kaikki_keikat[df_kaikki_keikat[COL_AUTOTUNNUS].isin(autot_mukana)]
+
+    # Yhdistetään nippujen hinnat yksittäisiin keikkoihin
+    df_erittely = pd.merge(
+        df_kaikki_keikat,
+        df_tulokset_niput[[COL_NIPPUNUMERO, COL_LIIKENNOITSIJA, 'Uusi_nippu_hinta']],
+        on=COL_NIPPUNUMERO,
+        how='left'
+    )
+    df_erittely.rename(columns={'Uusi_nippu_hinta': 'Hinta'}, inplace=True)
+    return df_erittely
+
+def luo_tulos_exceliin(df_tariffi, df_vyohykkeet, df_erittely):
+    """Luo ja palauttaa tulos-Excelin, joka sisältää myös yksittäiset lähetykset."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_tariffi.to_excel(writer, sheet_name='Lasketut_Tariffit', index=False)
+        df_vyohykkeet.to_excel(writer, sheet_name='Lasketut_Vyohykkeet', index=False)
+        
+        cols_to_show = [COL_AUTOTUNNUS, COL_LIIKENNOITSIJA, COL_NIPPUNUMERO, 'Hinta']
+        
+        df_erittely[df_erittely['Tyyppi'] == 'Jakelu'][cols_to_show].to_excel(
+            writer, sheet_name='Jakelut_eritelty', index=False
+        )
+        df_erittely[df_erittely['Tyyppi'] == 'Nouto'][cols_to_show].to_excel(
+            writer, sheet_name='Noudot_eritelty', index=False
+        )
+    return output.getvalue()
+# --- MUUTOKSEN LOPPU ---
+
 # =============================================================================
 # STREAMLIT-KÄYTTÖLIITTYMÄ
 # =============================================================================
@@ -467,6 +490,7 @@ if 'app_loaded' not in st.session_state:
     st.session_state.lukitut_tariffit = {}
     st.session_state.lukitut_vyohykkeet = {}
     st.session_state.last_error = ""
+    st.session_state.erittely_data = pd.DataFrame() # Uusi session state Excel-vientiä varten
 
 st.title("🚛 Rahtikustannusten optimointityökalu")
 
@@ -492,6 +516,7 @@ with st.sidebar:
                     st.session_state.lukitut_tariffit = {}
                     st.session_state.lukitut_vyohykkeet = {}
                     st.session_state.last_error = ""
+                    st.session_state.erittely_data = pd.DataFrame() # Nollataan myös tämä
                     st.toast("Data ladattu!", icon="✅")
             except Exception as e:
                 st.session_state.last_error = f"Tiedoston lukemisessa tapahtui odottamaton virhe: {e}"
@@ -508,6 +533,7 @@ with st.sidebar:
         st.session_state.vertailu_auto = pd.DataFrame()
         st.session_state.lukitut_tariffit = {}
         st.session_state.lukitut_vyohykkeet = {}
+        st.session_state.erittely_data = pd.DataFrame() # Nollataan myös tämä
         st.toast("Kaikki muutokset ja tulokset nollattu.", icon="🔄")
         st.rerun()
 
@@ -571,15 +597,29 @@ with st.sidebar:
             st.rerun()
             
     st.header("4. Tallenna & Vie")
-    if not st.session_state.df_tariff_current.empty:
+    # --- MUUTETTU KOHTA: Kaksivaiheinen vienti ---
+    if st.button("Valmistele Excel-raportti"):
+        if st.session_state.get("df_tulokset_yksiloity") is not None and not st.session_state.df_tulokset_yksiloity.empty:
+            st.session_state.erittely_data = laske_erittely_data(
+                st.session_state.sheets,
+                st.session_state.df_tulokset_yksiloity,
+                list(st.session_state.df_autot_current[COL_AUTOTUNNUS])
+            )
+            st.toast("Raportin data valmis ladattavaksi!", icon="📊")
+        else:
+            st.warning("Aja ensin laskenta ja valitse autoja, jotta raportti voidaan luoda.")
+
+    if not st.session_state.erittely_data.empty:
         st.download_button(
-            label="💾 Tallenna nykyiset tulokset",
-            data=luo_tulos_exceliin(st.session_state.df_tariff_current, st.session_state.df_zones_current),
-            file_name="optimoinnin_tulokset.xlsx",
+            label="💾 Lataa Excel-raportti",
+            data=luo_tulos_exceliin(st.session_state.df_tariff_current, st.session_state.df_zones_current, st.session_state.erittely_data),
+            file_name="optimoinnin_raportti.xlsx",
             mime="application/vnd.ms-excel"
         )
+    # --- MUUTOKSEN LOPPU ---
 
 # --- PÄÄNÄYTTÖ ---
+# ... (loput koodista pysyy täysin samana, lukuunottamatta yhtä kohtaa) ...
 if st.session_state.last_error: 
     st.error(st.session_state.last_error)
     st.session_state.last_error = ""
@@ -726,6 +766,27 @@ if not st.session_state.vertailu_auto.empty:
     
     df_naytettava = edited_autot[edited_autot['Mukana']]
     if not df_naytettava.empty:
+        # --- MUUTETTU KOHTA: Tulosten laskenta ja tallennus session stateen ---
+        df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
+        _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, list(autot_nyt_mukana))
+        df_tulokset_yksiloity = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
+        df_tulokset_yksiloity = pd.merge(df_tulokset_yksiloity, df_naytettava[[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]], on=COL_AUTOTUNNUS, how='left')
+        df_tulokset_yksiloity.dropna(subset=[COL_LIIKENNOITSIJA], inplace=True) # Varmistetaan, että vain valitut autot ovat mukana
+        df_tulokset_yksiloity['tariffi_rivi_idx'] = df_tulokset_yksiloity['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_orig))
+        df_tulokset_yksiloity.dropna(subset=['tariffi_rivi_idx'], inplace=True)
+        df_tulokset_yksiloity[COL_VYOHYKE] = pd.to_numeric(df_tulokset_yksiloity[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
+        valid_vyohykkeet = {int(c.split(' ')[1]) for c in st.session_state.df_tariff_current.columns if PREFIX_VYOHYKE_COL in c}
+        df_tulokset_yksiloity = df_tulokset_yksiloity[df_tulokset_yksiloity[COL_VYOHYKE].isin(valid_vyohykkeet)]
+
+        if not df_tulokset_yksiloity.empty:
+            df_tulokset_yksiloity['Uusi_nippu_hinta'] = df_tulokset_yksiloity.apply(
+                laske_oikea_nippu_hinta, axis=1,
+                df_tariff_current=st.session_state.df_tariff_current,
+                df_tariff_orig=df_tariff_orig
+            )
+        st.session_state.df_tulokset_yksiloity = df_tulokset_yksiloity
+        # --- MUUTOKSEN LOPPU ---
+        
         st.write("**Yhteenvedot (perustuen valittuihin autoihin):**")
         summa_auto = pd.DataFrame(df_naytettava[['Vanha kustannus (€)', 'Uusi kustannus (€)', 'Erotus (€)']].sum()).T
         summa_auto[COL_AUTOTUNNUS] = 'YHTEENSÄ'
@@ -740,24 +801,6 @@ if not st.session_state.vertailu_auto.empty:
         st.markdown("---")
         st.header("Porautumisanalyysi")
 
-        _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, list(autot_nyt_mukana))
-        df_niput_tulokset = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
-        df_niput_tulokset = pd.merge(df_niput_tulokset, df_naytettava[[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]], on=COL_AUTOTUNNUS, how='left')
-        df_niput_tulokset['tariffi_rivi_idx'] = df_niput_tulokset['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, st.session_state.sheets[SHEET_TARIFFI]))
-        df_niput_tulokset.dropna(subset=['tariffi_rivi_idx'], inplace=True)
-        df_niput_tulokset[COL_VYOHYKE] = pd.to_numeric(df_niput_tulokset[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
-        valid_vyohykkeet = {int(c.split(' ')[1]) for c in st.session_state.df_tariff_current.columns if PREFIX_VYOHYKE_COL in c}
-        df_niput_tulokset = df_niput_tulokset[df_niput_tulokset[COL_VYOHYKE].isin(valid_vyohykkeet)]
-
-        if not df_niput_tulokset.empty:
-            df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
-            df_niput_tulokset['Uusi_nippu_hinta'] = df_niput_tulokset.apply(
-                laske_oikea_nippu_hinta,
-                axis=1,
-                df_tariff_current=st.session_state.df_tariff_current,
-                df_tariff_orig=df_tariff_orig
-            )
-
         col1_drill, col2_drill = st.columns(2)
         with col1_drill:
             liik_lista = ["Valitse..."] + sorted(df_naytettava[COL_LIIKENNOITSIJA].unique())
@@ -767,11 +810,11 @@ if not st.session_state.vertailu_auto.empty:
             valittu_auto = st.selectbox("Valitse auto", auto_lista)
 
         if valittu_liik != "Valitse...":
-            data_filt = df_niput_tulokset[df_niput_tulokset[COL_LIIKENNOITSIJA] == valittu_liik]
+            data_filt = st.session_state.df_tulokset_yksiloity[st.session_state.df_tulokset_yksiloity[COL_LIIKENNOITSIJA] == valittu_liik]
             vanha_kustannus = df_liikenne[df_liikenne[COL_LIIKENNOITSIJA] == valittu_liik]['Vanha kustannus (€)'].sum()
             nayta_porautumisanalyysi(data_filt, vanha_kustannus, valittu_liik)
         
         elif valittu_auto != "Valitse...":
-            data_filt = df_niput_tulokset[df_niput_tulokset[COL_AUTOTUNNUS] == valittu_auto]
+            data_filt = st.session_state.df_tulokset_yksiloity[st.session_state.df_tulokset_yksiloity[COL_AUTOTUNNUS] == valittu_auto]
             vanha_kustannus = df_naytettava[df_naytettava[COL_AUTOTUNNUS] == valittu_auto]['Vanha kustannus (€)'].sum()
             nayta_porautumisanalyysi(data_filt, vanha_kustannus, valittu_auto)
