@@ -745,6 +745,7 @@ if 'sheets' in st.session_state and st.session_state.sheets:
 
     df_tariff_orig = st.session_state.sheets[SHEET_TARIFFI]
     _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, st.session_state.sheets[SHEET_AUTOT][COL_AUTOTUNNUS])
+    st.session_state.df_zones_current[COL_POSTINUMERO] = st.session_state.df_zones_current[COL_POSTINUMERO].astype(str)
     df_tulokset_yksiloity_temp = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
     df_tulokset_yksiloity_temp[COL_VYOHYKE] = pd.to_numeric(df_tulokset_yksiloity_temp[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
     if not df_tulokset_yksiloity_temp.empty:
