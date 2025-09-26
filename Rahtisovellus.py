@@ -330,7 +330,7 @@ def suorita_tariffi_optimointi(sheets, df_zones_current, autot_mukana, params):
 # =============================================================================
 # OPTIMOINTI: VYÖHYKKEIDEN MÄÄRITYS
 # =============================================================================
-def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
+def suorita_vyohyke_optimointi(sheets, df_tariff_current, df_zones_current, autot_mukana, params):
     df_zones_current[COL_POSTINUMERO] = df_zones_current[COL_POSTINUMERO].astype(str)
     df_autot, df_niput_base, df_tariff_input = _valmistele_data(sheets, autot_mukana)
     df_niput_base['tariffi_rivi_idx'] = df_niput_base['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_input))
@@ -597,7 +597,13 @@ with st.sidebar:
             if st.button("Suorita matemaattinen optimointi"):
                 with st.spinner("Optimoidaan vyöhykkeitä..."):
                     params = {'taso': tasmaystaso, 'heitto': sallittu_heitto, 'vaje': sallittu_optimointivaje, 'lukitut_vyohykkeet': st.session_state.lukitut_vyohykkeet}
-                    status, tulos, vertailu = suorita_vyohyke_optimointi(st.session_state.sheets, st.session_state.df_tariff_current, list(st.session_state.df_autot_current[COL_AUTOTUNNUS]), params)
+                    status, tulos, vertailu = suorita_vyohyke_optimointi(
+                        st.session_state.sheets, 
+                        st.session_state.df_tariff_current, 
+                        st.session_state.df_zones_current,  # <-- LISÄTTY ARGUMENTTI
+                        list(st.session_state.df_autot_current[COL_AUTOTUNNUS]), 
+                        params
+                    )
                     if status == "ok":
                         original_zones = st.session_state.sheets[SHEET_PNRO].copy().drop(columns=COL_VYOHYKE, errors='ignore')
                         original_zones[COL_POSTINUMERO] = original_zones[COL_POSTINUMERO].astype(str)
