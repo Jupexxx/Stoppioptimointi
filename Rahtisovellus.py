@@ -331,6 +331,7 @@ def suorita_tariffi_optimointi(sheets, df_zones_current, autot_mukana, params):
 # OPTIMOINTI: VYÖHYKKEIDEN MÄÄRITYS
 # =============================================================================
 def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
+    df_zones_current[COL_POSTINUMERO] = df_zones_current[COL_POSTINUMERO].astype(str)
     df_autot, df_niput_base, df_tariff_input = _valmistele_data(sheets, autot_mukana)
     df_niput_base['tariffi_rivi_idx'] = df_niput_base['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_input))
     df_niput = df_niput_base.dropna(subset=['tariffi_rivi_idx']).copy()
@@ -827,6 +828,8 @@ if 'sheets' in st.session_state and st.session_state.sheets:
 
         autot_nyt_mukana = set(df_naytettava[COL_AUTOTUNNUS])
         _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, list(autot_nyt_mukana))
+        df_niput_base[COL_POSTINUMERO] = df_niput_base[COL_POSTINUMERO].astype(str)
+        st.session_state.df_zones_current[COL_POSTINUMERO] = st.session_state.df_zones_current[COL_POSTINUMERO].astype(str)
         df_tulokset_yksiloity = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
         df_tulokset_yksiloity = pd.merge(df_tulokset_yksiloity, df_naytettava[[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]], on=COL_AUTOTUNNUS, how='left')
         df_tulokset_yksiloity.dropna(subset=[COL_LIIKENNOITSIJA], inplace=True)
