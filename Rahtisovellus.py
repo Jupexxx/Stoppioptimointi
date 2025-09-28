@@ -1,3 +1,5 @@
+# --- START OF FILE Rahtisovellus.py ---
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -75,14 +77,6 @@ def luo_mallipohja_exceliin():
         }).to_excel(writer, sheet_name=SHEET_TARIFFI, index=False)
     return output.getvalue()
 
-def luo_tulos_exceliin(df_tariffi, df_vyohykkeet):
-    """Luo ja palauttaa tulos-Excelin, joka sisältää tariffit ja vyöhykkeet."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_tariffi.to_excel(writer, sheet_name='Lasketut_Tariffit', index=False)
-        df_vyohykkeet.to_excel(writer, sheet_name='Lasketut_Vyohykkeet', index=False)
-    return output.getvalue()
-
 def validoi_syotetiedosto(sheets):
     """Tarkistaa, että ladattu Excel sisältää kaikki tarvittavat välilehdet ja sarakkeet."""
     vaatimukset = {
@@ -119,18 +113,119 @@ def get_painoluokka_rivi_idx(paino, df_tariff):
     sopivat_rivit = df_tariff_copy[(df_tariff_copy[COL_PAINO_ALKU] <= paino) & (df_tariff_copy[COL_PAINO_LOPPU] >= paino)]
     return sopivat_rivit.index[0] if not sopivat_rivit.empty else None
 
-def _valmistele_data(sheets, autot_mukana):
-    df_autot_orig = sheets[SHEET_AUTOT]
-    df_autot = df_autot_orig[df_autot_orig[COL_AUTOTUNNUS].isin(autot_mukana)].copy()
-    df_keikat = pd.concat([sheets[SHEET_JAKO], sheets[SHEET_NOUTO]], ignore_index=True)
-    df_keikat = df_keikat[df_keikat[COL_AUTOTUNNUS].isin(autot_mukana)]
+# MUUTOS: Lisätty @st.cache_data tehostamaan datan valmistelua
+@st.cache_data
+def _valmistele_data(_sheets, _autot_mukana):
+    df_autot_orig = _sheets[SHEET_AUTOT]
+    df_autot = df_autot_orig[df_autot_orig[COL_AUTOTUNNUS].isin(_autot_mukana)].copy()
+    # MUUTOS: Varmistetaan, että datatyypit ovat oikein ennen yhdistämistä
+    df_jako = _sheets[SHEET_JAKO].copy()
+    df_nouto = _sheets[SHEET_NOUTO].copy()
+    df_jako[COL_POSTINUMERO] = df_jako[COL_POSTINUMERO].astype(str)
+    df_nouto[COL_POSTINUMERO] = df_nouto[COL_POSTINUMERO].astype(str)
+
+    df_keikat = pd.concat([df_jako, df_nouto], ignore_index=True)
+    df_keikat = df_keikat[df_keikat[COL_AUTOTUNNUS].isin(_autot_mukana)]
     df_niput = df_keikat.groupby(COL_NIPPUNUMERO).agg(
         nippu_paino=(COL_KILOT, 'sum'),
         Autotunnus=(COL_AUTOTUNNUS, 'first'),
         Postinumero=(COL_POSTINUMERO, 'first')
     ).reset_index()
+    # Tämä on jo varmistettu yllä, mutta pidetään varmuuden vuoksi
     df_niput[COL_POSTINUMERO] = df_niput[COL_POSTINUMERO].astype(str)
-    return df_autot, df_niput, sheets[SHEET_TARIFFI]
+    return df_autot, df_niput, _sheets[SHEET_TARIFFI]
+
+def laske_oikea_nippu_hinta(row, df_tariff_current, df_tariff_orig):
+    """Laskee nipulle hinnan ja varmistaa monotonisuuden painoluokkien välillä."""
+    paino = row['nippu_paino']
+    vyohyke = row['Vyöhyke']
+    vyohyke_sarake = f"{PREFIX_VYOHYKE_COL} {vyohyke}"
+    if vyohyke_sarake not in df_tariff_current.columns:
+        return 0.0
+
+    rivi_idx = get_painoluokka_rivi_idx(paino, df_tariff_orig)
+    if rivi_idx is None:
+        return 0.0
+    
+    try:
+        rivi_sijainti = df_tariff_orig.index.get_loc(rivi_idx)
+    except KeyError:
+        return 0.0
+
+    nykyinen_rivi = df_tariff_orig.iloc[rivi_sijainti]
+    laskentatapa = nykyinen_rivi[COL_LASKENTATAPA]
+    hinta = pd.to_numeric(df_tariff_current.iloc[rivi_sijainti][vyohyke_sarake], errors='coerce')
+    if pd.isna(hinta): return 0.0
+    
+    raakahinta = paino * hinta if laskentatapa == LASKENTATAPA_KG else hinta
+
+    if rivi_sijainti == 0:
+        return raakahinta
+
+    # MUUTOS: Korjattu pieni logiikkavirhe monotonisuuden tarkistuksessa
+    # Varmistetaan, että lattiahinta lasketaan oikein myös €/nippu -tapauksissa
+    edellinen_rivi = df_tariff_orig.iloc[rivi_sijainti - 1]
+    edellinen_loppu_kg = pd.to_numeric(edellinen_rivi[COL_PAINO_LOPPU], errors='coerce')
+    
+    if pd.notna(edellinen_loppu_kg):
+        edellinen_laskentatapa = edellinen_rivi[COL_LASKENTATAPA]
+        edellinen_hinta = pd.to_numeric(df_tariff_current.iloc[rivi_sijainti - 1][vyohyke_sarake], errors='coerce')
+        if pd.isna(edellinen_hinta): return raakahinta
+
+        # Lattiahinta on aina edellisen painoluokan ylärajan hinta.
+        # Jos edellinen oli €/kg, lasketaan painon mukaan, muuten otetaan kappalehinta.
+        if edellinen_laskentatapa == LASKENTATAPA_KG:
+            # Tämä tapaus on harvinainen, mutta varmistetaan
+            edellinen_alku_kg = pd.to_numeric(edellinen_rivi[COL_PAINO_ALKU], errors='coerce')
+            lattiahinta_paino = edellinen_loppu_kg if pd.notna(edellinen_loppu_kg) else edellinen_alku_kg
+            lattiahinta = lattiahinta_paino * edellinen_hinta
+        else: # €/nippu
+            lattiahinta = edellinen_hinta
+        
+        # Jos nykyinen on €/kg, varmistetaan ettei se alita edellisen luokan kattohintaa
+        if laskentatapa == LASKENTATAPA_KG:
+            return max(raakahinta, lattiahinta)
+        # Jos nykyinen on €/nippu, varmistetaan ettei se ole edellistä halvempi
+        else:
+            return max(raakahinta, lattiahinta)
+            
+    return raakahinta
+
+@st.cache_data
+def laske_analyysi_data(_sheets, _df_zones_current, _df_tariff_current, _autot_mukana):
+    """Laskee kaikki analyysiin tarvittavat datat ja käyttää välimuistia suorituskyvyn parantamiseksi."""
+    df_tariff_orig = _sheets[SHEET_TARIFFI]
+    
+    _, df_niput_base, _ = _valmistele_data(_sheets, list(_autot_mukana))
+    
+    df_zones = _df_zones_current.copy()
+    df_zones[COL_POSTINUMERO] = df_zones[COL_POSTINUMERO].astype(str)
+    
+    df_tulokset_yksiloity = pd.merge(df_niput_base, df_zones[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='left').dropna(subset=[COL_VYOHYKE])
+    df_tulokset_yksiloity[COL_VYOHYKE] = pd.to_numeric(df_tulokset_yksiloity[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
+
+    # Lisätään liikennöitsijätieto, jota tarvitaan myöhemmin
+    df_autot_orig = _sheets[SHEET_AUTOT]
+    df_tulokset_yksiloity = pd.merge(df_tulokset_yksiloity, df_autot_orig[[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]], on=COL_AUTOTUNNUS, how='left')
+
+    if not df_tulokset_yksiloity.empty:
+        df_tulokset_yksiloity['Uusi_nippu_hinta'] = df_tulokset_yksiloity.apply(
+            laske_oikea_nippu_hinta, axis=1,
+            df_tariff_current=_df_tariff_current,
+            df_tariff_orig=df_tariff_orig
+        )
+    else:
+        df_tulokset_yksiloity['Uusi_nippu_hinta'] = 0.0
+
+    korjatut_summat = df_tulokset_yksiloity.groupby(COL_AUTOTUNNUS)['Uusi_nippu_hinta'].sum()
+    
+    df_vertailu = pd.DataFrame({
+        COL_AUTOTUNNUS: df_autot_orig[COL_AUTOTUNNUS],
+        'Vanha kustannus (€)': df_autot_orig[COL_VANHAT_KULUT]
+    })
+    df_vertailu['Uusi kustannus (€)'] = df_vertailu[COL_AUTOTUNNUS].map(korjatut_summat).fillna(0)
+    
+    return df_vertailu, df_tulokset_yksiloity
 
 # =============================================================================
 # OPTIMOINTI: TARIFFIEN LASKENTA
@@ -225,7 +320,6 @@ def suorita_tariffi_optimointi(sheets, df_zones_current, autot_mukana, params):
     df_autot, df_niput_base, df_tariff_input = _valmistele_data(sheets, autot_mukana)
     df_niput_base['tariffi_rivi_idx'] = df_niput_base['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_input))
     df_niput_base.dropna(subset=['tariffi_rivi_idx'], inplace=True)
-    df_zones_current[COL_POSTINUMERO] = df_zones_current[COL_POSTINUMERO].astype(str)
     df_niput = pd.merge(df_niput_base, df_zones_current, on=COL_POSTINUMERO, how='inner')
     df_niput[COL_VYOHYKE] = pd.to_numeric(df_niput[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
     if df_niput.empty: return "virhe", "Datan yhdistelyn jälkeen ei jäänyt yhtään käsiteltävää nippua.", None
@@ -261,14 +355,18 @@ def suorita_tariffi_optimointi(sheets, df_zones_current, autot_mukana, params):
 # =============================================================================
 # OPTIMOINTI: VYÖHYKKEIDEN MÄÄRITYS
 # =============================================================================
-def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
+def suorita_vyohyke_optimointi(sheets, df_tariff_current, df_zones_current, autot_mukana, params):
     df_autot, df_niput_base, df_tariff_input = _valmistele_data(sheets, autot_mukana)
     df_niput_base['tariffi_rivi_idx'] = df_niput_base['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_input))
     df_niput = df_niput_base.dropna(subset=['tariffi_rivi_idx']).copy()
     if df_niput.empty: return "virhe", "Datan valmistelun jälkeen ei jäänyt yhtään käsiteltävää nippua.", None
+    
+    # MUUTOS: Otetaan vain ne postinumerot mukaan optimointiin, joille on keikkoja. Tämä nopeuttaa huomattavasti.
+    postinumerot_datassa = df_niput[COL_POSTINUMERO].unique()
+    
     model = pyo.ConcreteModel()
     autot = list(df_autot[COL_AUTOTUNNUS]); model.AUTOT = pyo.Set(initialize=autot)
-    postinumerot = df_niput[COL_POSTINUMERO].unique(); model.POSTINUMEROT = pyo.Set(initialize=postinumerot)
+    model.POSTINUMEROT = pyo.Set(initialize=postinumerot_datassa)
     vyohyke_sarakkeet = [c for c in df_tariff_current.columns if PREFIX_VYOHYKE_COL in c]
     vyohykkeet = sorted([int(c.split(' ')[1]) for c in vyohyke_sarakkeet]); model.VYOHYKKEET = pyo.Set(initialize=vyohykkeet)
     model.y = pyo.Var(model.POSTINUMEROT, model.VYOHYKKEET, within=pyo.Binary)
@@ -318,17 +416,29 @@ def suorita_vyohyke_optimointi(sheets, df_tariff_current, autot_mukana, params):
                      "erityisesti suurilla datamäärillä. Kokeile pienemmällä datasetillä tai suurenna sallittua optimointivajetta.")
         return "virhe", error_msg, None
 
-    if (results.solver.status == pyo.SolverStatus.ok) and (results.solver.termination_condition == pyo.TerminationCondition.optimal):
+    if (results.solver.status == pyo.SolverStatus.ok) and (results.solver.termination_condition in [pyo.TerminationCondition.optimal, pyo.TerminationCondition.feasible]):
         tulokset = [{COL_POSTINUMERO: p, COL_VYOHYKE: v} for p in model.POSTINUMEROT for v in model.VYOHYKKEET if pyo.value(model.y[p,v]) > 0.9]
         df_tulos = pd.DataFrame(tulokset)
+        
+        # MUUTOS: Palautetaan täydellinen vyöhykelista, ei vain optimoituja.
+        df_tulos_final = df_zones_current[[COL_POSTINUMERO]].copy()
+        df_tulos_final = pd.merge(df_tulos_final, df_tulos, on=COL_POSTINUMERO, how='left')
+        
+        # Täytetään optimoinnin ulkopuolelle jääneet postinumerot vanhoilla arvoilla.
+        original_vyohykkeet = df_zones_current.set_index(COL_POSTINUMERO)[COL_VYOHYKE]
+        df_tulos_final[COL_VYOHYKE] = df_tulos_final[COL_VYOHYKE].fillna(df_tulos_final[COL_POSTINUMERO].map(original_vyohykkeet))
+
         df_vertailu_auto = pd.DataFrame([{COL_AUTOTUNNUS: a, 'Vanha kustannus (€)': vanhat_kulut_dict_auto.get(a, 0), 'Uusi kustannus (€)': pyo.value(model.uusi_kustannus_per_auto[a])} for a in model.AUTOT])
-        return "ok", df_tulos, df_vertailu_auto
+        return "ok", df_tulos_final, df_vertailu_auto
     else: return "virhe", "Ratkaisua ei löytynyt. Kokeile löysempiä parametreja tai poista lukituksia.", None
 
-def laske_vyohykkeet_automaattisesti(df_keikat, df_pnro, paakeskus_pnro='60100'):
-    df_keikat[COL_POSTINUMERO] = df_keikat[COL_POSTINUMERO].astype(str)
+# MUUTOS: Lisätty @st.cache_data tehostamaan laskentaa
+@st.cache_data
+def laske_vyohykkeet_automaattisesti(_df_keikat, _df_pnro, paakeskus_pnro='60100'):
+    # Käytetään kopioita, jotta alkuperäiset datat eivät muutu session statessa
+    df_keikat = _df_keikat.copy()
+    df_pnro = _df_pnro.copy()
     df_volyymit = df_keikat.groupby(COL_POSTINUMERO).agg(Kilot_sum=(COL_KILOT, 'sum'), Rahtikirjojen_lkm=(COL_RAHTIKIRJA, 'nunique'), Nippujen_lkm=(COL_NIPPUNUMERO, 'nunique')).reset_index()
-    df_pnro[COL_POSTINUMERO] = df_pnro[COL_POSTINUMERO].astype(str)
     df_pnro_valmis = pd.merge(df_pnro, df_volyymit, on=COL_POSTINUMERO, how='left').fillna({'Rahtikirjojen_lkm': 0, 'Nippujen_lkm': 0, 'Kilot_sum': 0})
     df_pnro_valmis.replace('EILÖYDY', np.nan, inplace=True)
     coords_map = df_pnro_valmis.dropna(subset=[COL_X_KOORD, COL_Y_KOORD]).set_index(COL_POSTINUMERO)
@@ -373,15 +483,19 @@ def laske_vyohykkeet_automaattisesti(df_keikat, df_pnro, paakeskus_pnro='60100')
     return df_pnro_valmis[output_cols].rename(columns={'Uusi_Vyohyke': COL_VYOHYKE})
 
 # --- APUFUNKTIO PORAUTUMISNÄYTÖLLE ---
-def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
+def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko, df_tariff_orig):
     """Näyttää standardoidun analyysinäkymän annetulle datalle."""
     st.subheader(f"Porautumisanalyysi: {otsikko}")
     if data_valinnalle.empty:
         st.warning("Valinnalle ei löytynyt kustannusdataa.")
         return
-
-    painoluokka_jarjestys = [get_painoluokka_str(i, st.session_state.sheets[SHEET_TARIFFI]) for i in st.session_state.sheets[SHEET_TARIFFI].index]
-    data_valinnalle['Painoluokka'] = data_valinnalle['tariffi_rivi_idx'].apply(lambda idx: get_painoluokka_str(idx, st.session_state.sheets[SHEET_TARIFFI]))
+    
+    # MUUTOS: Lisätään 'tariffi_rivi_idx' ja painoluokat dataan porautumista varten
+    data_valinnalle['tariffi_rivi_idx'] = data_valinnalle['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, df_tariff_orig))
+    data_valinnalle.dropna(subset=['tariffi_rivi_idx'], inplace=True)
+    
+    painoluokka_jarjestys = [get_painoluokka_str(i, df_tariff_orig) for i in df_tariff_orig.index]
+    data_valinnalle['Painoluokka'] = data_valinnalle['tariffi_rivi_idx'].apply(lambda idx: get_painoluokka_str(idx, df_tariff_orig))
     data_valinnalle['Painoluokka'] = pd.Categorical(data_valinnalle['Painoluokka'], categories=painoluokka_jarjestys, ordered=True)
     
     total_cost = data_valinnalle['Uusi_nippu_hinta'].sum()
@@ -390,12 +504,100 @@ def nayta_porautumisanalyysi(data_valinnalle, vanha_kustannus, otsikko):
     pivot_table_abs = pd.pivot_table(data_valinnalle, values='Uusi_nippu_hinta', index='Painoluokka', columns=COL_VYOHYKE, aggfunc='sum', fill_value=0)
     
     st.write("**Kustannusten jakautuminen (€)**")
-    st.dataframe(pivot_table_abs.style.background_gradient(cmap='Greens').format("{:,.2f} €"), use_container_width=True)
+    st.dataframe(pivot_table_abs.style.background_gradient(cmap='Greens', axis=None).format("{:,.2f} €"), use_container_width=True)
     
     if total_cost > 0:
         pivot_table_perc = (pivot_table_abs / total_cost * 100)
         st.write("**Kustannusten jakautuminen (%)**")
-        st.dataframe(pivot_table_perc.style.background_gradient(cmap='Blues').format("{:.2f}%"), use_container_width=True)
+        st.dataframe(pivot_table_perc.style.background_gradient(cmap='Blues', axis=None).format("{:.2f}%"), use_container_width=True)
+
+# --- FUNKTIOT EXCEL-VIENTIÄ VARTEN ---
+def laske_erittely_data(sheets, df_tulokset_niput, autot_mukana):
+    """Valmistelee yksittäisten lähetysten datan Excel-vientiä varten."""
+    df_jako = sheets[SHEET_JAKO].copy()
+    df_nouto = sheets[SHEET_NOUTO].copy()
+    
+    df_jako['Tyyppi'] = 'Jakelu'
+    df_nouto['Tyyppi'] = 'Nouto'
+    
+    df_kaikki_keikat = pd.concat([df_jako, df_nouto], ignore_index=True)
+    df_kaikki_keikat = df_kaikki_keikat[df_kaikki_keikat[COL_AUTOTUNNUS].isin(autot_mukana)]
+
+    # MUUTOS TÄSSÄ: Otetaan mukaan myös 'Vyöhyke' df_tulokset_niput-taulukosta
+    cols_to_merge = [COL_NIPPUNUMERO, COL_LIIKENNOITSIJA, 'nippu_paino', 'Uusi_nippu_hinta', COL_VYOHYKE]
+    
+    # Varmistetaan, että kaikki sarakkeet ovat olemassa ennen yhdistämistä
+    valid_cols_to_merge = [col for col in cols_to_merge if col in df_tulokset_niput.columns]
+
+    df_erittely = pd.merge(
+        df_kaikki_keikat,
+        df_tulokset_niput[valid_cols_to_merge],
+        on=COL_NIPPUNUMERO,
+        how='left'
+    )
+    df_erittely.rename(columns={'Uusi_nippu_hinta': 'Hinta', 'nippu_paino': 'Paino'}, inplace=True)
+    return df_erittely
+
+def luo_tulos_exceliin(df_tariffi, df_vyohykkeet, df_erittely):
+    """Luo ja palauttaa tulos-Excelin, joka sisältää myös yksittäiset lähetykset."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_tariffi.to_excel(writer, sheet_name='Lasketut_Tariffit', index=False)
+        df_vyohykkeet.to_excel(writer, sheet_name='Lasketut_Vyohykkeet', index=False)
+        
+        # MUUTOS TÄSSÄ: Lisätään Postinumero ja Vyöhyke näytettäviin sarakkeisiin
+        cols_to_show = [
+            COL_AUTOTUNNUS, COL_LIIKENNOITSIJA, COL_NIPPUNUMERO, 
+            COL_POSTINUMERO, COL_VYOHYKE, 'Paino', 'Hinta'
+        ]
+        
+        # Varmistetaan, että vain olemassa olevat sarakkeet valitaan
+        valid_cols_to_show = [col for col in cols_to_show if col in df_erittely.columns]
+        
+        df_jako_erittely = df_erittely[df_erittely['Tyyppi'] == 'Jakelu']
+        df_nouto_erittely = df_erittely[df_erittely['Tyyppi'] == 'Nouto']
+        
+        df_jako_erittely[valid_cols_to_show].to_excel(writer, sheet_name='Jakelut_eritelty', index=False)
+        df_nouto_erittely[valid_cols_to_show].to_excel(writer, sheet_name='Noudot_eritelty', index=False)
+    return output.getvalue()
+
+# UUSI FUNKTIO: Siirretään vyöhykenäkymän datan valmistelu omaan välimuistitettuun funktioon
+@st.cache_data
+def valmistele_vyohykenakyma_data(_df_zones_current, _sheets):
+    """Valmistelee datan vyöhyketaulukon näyttöä ja karttaa varten."""
+    df_zones_display = _df_zones_current.copy()
+
+    # Yhdistä postitoimipaikka
+    if COL_POSTITOIMIPAIKKA not in df_zones_display.columns:
+        df_pnro_orig = _sheets[SHEET_PNRO]
+        df_zones_display = pd.merge(df_zones_display, df_pnro_orig[[COL_POSTINUMERO, COL_POSTITOIMIPAIKKA]], on=COL_POSTINUMERO, how='left')
+    
+    # Laske rahtikirjojen lukumäärä per postinumero
+    df_keikat_temp = pd.concat([_sheets[SHEET_JAKO], _sheets[SHEET_NOUTO]], ignore_index=True)
+    rk_lkm = df_keikat_temp.groupby(COL_POSTINUMERO)[COL_RAHTIKIRJA].nunique().reset_index(name='Rahtikirjojen_lkm')
+    
+    if 'Rahtikirjojen_lkm' in df_zones_display.columns:
+        df_zones_display = df_zones_display.drop(columns=['Rahtikirjojen_lkm'])
+        
+    df_zones_display = pd.merge(df_zones_display, rk_lkm, on=COL_POSTINUMERO, how='left').fillna({'Rahtikirjojen_lkm': 0})
+    
+    display_cols = [COL_POSTINUMERO, COL_POSTITOIMIPAIKKA, COL_VYOHYKE, 'Rahtikirjojen_lkm']
+    for col in display_cols:
+        if col not in df_zones_display.columns: df_zones_display[col] = np.nan
+    df_zones_display['Rahtikirjojen_lkm'] = df_zones_display['Rahtikirjojen_lkm'].astype(int)
+
+    # Valmistele karttadata
+    df_map = df_zones_display.copy()
+    df_map.replace('EILÖYDY', np.nan, inplace=True)
+    df_map.dropna(subset=[COL_X_KOORD, COL_Y_KOORD, COL_VYOHYKE], inplace=True)
+    if not df_map.empty:
+        transformer = Transformer.from_crs("EPSG:3067", "EPSG:4326", always_xy=True)
+        df_map['lon'], df_map['lat'] = transformer.transform(df_map[COL_X_KOORD].values, df_map[COL_Y_KOORD].values)
+        df_map[COL_VYOHYKE] = df_map[COL_VYOHYKE].astype(int)
+        colors = [[33, 150, 243, 160], [100, 181, 246, 160], [255, 235, 59, 160], [255, 193, 7, 160], [255, 87, 34, 160], [213, 0, 0, 160]]
+        df_map['color'] = df_map[COL_VYOHYKE].apply(lambda z: colors[min(z - 1, len(colors) - 1)])
+
+    return df_zones_display, df_map
 
 # =============================================================================
 # STREAMLIT-KÄYTTÖLIITTYMÄ
@@ -409,10 +611,12 @@ if 'app_loaded' not in st.session_state:
     st.session_state.df_tariff_current = pd.DataFrame()
     st.session_state.df_zones_current = pd.DataFrame()
     st.session_state.df_autot_current = pd.DataFrame()
-    st.session_state.vertailu_auto = pd.DataFrame()
+    st.session_state.df_tulokset_yksiloity = pd.DataFrame() # MUUTOS: Tähän tallennetaan analyysidata
     st.session_state.lukitut_tariffit = {}
     st.session_state.lukitut_vyohykkeet = {}
     st.session_state.last_error = ""
+    st.session_state.erittely_data = pd.DataFrame()
+    st.session_state.autot_editor_state = {}
 
 st.title("🚛 Rahtikustannusten optimointityökalu")
 
@@ -430,15 +634,20 @@ with st.sidebar:
                 if virheet:
                     st.session_state.last_error = "Virhe syötetiedostossa: " + ", ".join(virheet)
                 else:
+                    # MUUTOS: Varmistetaan datatyypit heti latauksen jälkeen
+                    for df in sheets.values():
+                        if COL_POSTINUMERO in df.columns:
+                            df[COL_POSTINUMERO] = df[COL_POSTINUMERO].astype(str)
+
                     st.session_state.sheets = sheets
                     st.session_state.df_tariff_current = sheets[SHEET_TARIFFI].copy()
                     st.session_state.df_zones_current = sheets[SHEET_PNRO].copy()
                     st.session_state.df_autot_current = sheets[SHEET_AUTOT].copy()
-                    st.session_state.vertailu_auto = pd.DataFrame()
+                    st.session_state.df_tulokset_yksiloity = pd.DataFrame()
                     st.session_state.lukitut_tariffit = {}
                     st.session_state.lukitut_vyohykkeet = {}
                     st.session_state.last_error = ""
-                    st.toast("Data ladattu!", icon="✅")
+                    st.session_state.erittely_data = pd.DataFrame()
             except Exception as e:
                 st.session_state.last_error = f"Tiedoston lukemisessa tapahtui odottamaton virhe: {e}"
             st.rerun()
@@ -451,9 +660,10 @@ with st.sidebar:
         st.session_state.df_tariff_current = st.session_state.sheets[SHEET_TARIFFI].copy()
         st.session_state.df_zones_current = st.session_state.sheets[SHEET_PNRO].copy()
         st.session_state.df_autot_current = st.session_state.sheets[SHEET_AUTOT].copy()
-        st.session_state.vertailu_auto = pd.DataFrame()
+        st.session_state.df_tulokset_yksiloity = pd.DataFrame()
         st.session_state.lukitut_tariffit = {}
         st.session_state.lukitut_vyohykkeet = {}
+        st.session_state.erittely_data = pd.DataFrame()
         st.toast("Kaikki muutokset ja tulokset nollattu.", icon="🔄")
         st.rerun()
 
@@ -476,7 +686,9 @@ with st.sidebar:
                     with st.spinner("Analysoidaan dataa..."):
                         df_keikat = pd.concat([st.session_state.sheets[SHEET_JAKO], st.session_state.sheets[SHEET_NOUTO]], ignore_index=True)
                         tulos = laske_vyohykkeet_automaattisesti(df_keikat, st.session_state.sheets[SHEET_PNRO], paakeskus_pnro)
-                        st.session_state.df_zones_current = tulos
+                        # MUUTOS: Yhdistetään alkuperäisiin tietoihin, jotta koordinaatit säilyvät
+                        df_orig_pnro = st.session_state.sheets[SHEET_PNRO].drop(columns=[COL_VYOHYKE], errors='ignore')
+                        st.session_state.df_zones_current = pd.merge(df_orig_pnro, tulos[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='left')
                         st.session_state.lukitut_vyohykkeet = {}
                     st.toast("Uusi vyöhykemalli generoitu ja lukitukset poistettu!", icon="🤖")
                 except ValueError as e:
@@ -487,16 +699,24 @@ with st.sidebar:
             if st.button("Suorita matemaattinen optimointi"):
                 with st.spinner("Optimoidaan vyöhykkeitä..."):
                     params = {'taso': tasmaystaso, 'heitto': sallittu_heitto, 'vaje': sallittu_optimointivaje, 'lukitut_vyohykkeet': st.session_state.lukitut_vyohykkeet}
-                    status, tulos, vertailu = suorita_vyohyke_optimointi(st.session_state.sheets, st.session_state.df_tariff_current, list(st.session_state.df_autot_current[COL_AUTOTUNNUS]), params)
+                    status, tulos, vertailu = suorita_vyohyke_optimointi(
+                        st.session_state.sheets, 
+                        st.session_state.df_tariff_current, 
+                        st.session_state.df_zones_current,
+                        list(st.session_state.df_autot_current[COL_AUTOTUNNUS]), 
+                        params
+                    )
                     if status == "ok":
+                        # MUUTOS: Yhdistetään tulos alkuperäiseen dataan, jotta kaikki sarakkeet säilyvät
                         original_zones = st.session_state.sheets[SHEET_PNRO].copy().drop(columns=COL_VYOHYKE, errors='ignore')
-                        original_zones[COL_POSTINUMERO] = original_zones[COL_POSTINUMERO].astype(str)
-                        tulos[COL_POSTINUMERO] = tulos[COL_POSTINUMERO].astype(str)
-                        new_zones_complete = pd.merge(original_zones, tulos, on=COL_POSTINUMERO, how='left')
+                        new_zones_complete = pd.merge(original_zones, tulos[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='left')
+                        
                         for pnro, vyohyke in st.session_state.lukitut_vyohykkeet.items():
                              new_zones_complete.loc[new_zones_complete[COL_POSTINUMERO] == pnro, COL_VYOHYKE] = vyohyke
+                        
                         st.session_state.df_zones_current = new_zones_complete
-                        st.session_state.vertailu_auto = vertailu
+                        # MUUTOS: Nollataan analyysidata, koska vyöhykkeet muuttuivat
+                        st.session_state.df_tulokset_yksiloity = pd.DataFrame()
                         st.toast("Vyöhykkeet optimoitu!", icon="🎯")
                     else: st.session_state.last_error = tulos
                 st.rerun()
@@ -510,18 +730,30 @@ with st.sidebar:
                 status, tulos, vertailu = suorita_tariffi_optimointi(st.session_state.sheets, st.session_state.df_zones_current, list(st.session_state.df_autot_current[COL_AUTOTUNNUS]), params)
                 if status == "ok": 
                     st.session_state.df_tariff_current = tulos
-                    st.session_state.vertailu_auto = vertailu
+                    # MUUTOS: Nollataan analyysidata, koska tariffit muuttuivat
+                    st.session_state.df_tulokset_yksiloity = pd.DataFrame()
                     st.toast("Uudet tariffit laskettu!", icon="💰")
                 else: 
                     st.session_state.last_error = tulos
             st.rerun()
             
     st.header("4. Tallenna & Vie")
-    if not st.session_state.df_tariff_current.empty:
+    if st.button("Valmistele Excel-raportti"):
+        if 'df_tulokset_yksiloity' in st.session_state and not st.session_state.df_tulokset_yksiloity.empty:
+            st.session_state.erittely_data = laske_erittely_data(
+                st.session_state.sheets,
+                st.session_state.df_tulokset_yksiloity,
+                list(st.session_state.df_autot_current[COL_AUTOTUNNUS])
+            )
+            st.toast("Raportin data valmis ladattavaksi!", icon="📊")
+        else:
+            st.warning("Analyysidataa ei ole laskettu. Tee ensin muutoksia ja analysoi tulokset.")
+
+    if not st.session_state.erittely_data.empty:
         st.download_button(
-            label="💾 Tallenna nykyiset tulokset",
-            data=luo_tulos_exceliin(st.session_state.df_tariff_current, st.session_state.df_zones_current),
-            file_name="optimoinnin_tulokset.xlsx",
+            label="💾 Lataa Excel-raportti",
+            data=luo_tulos_exceliin(st.session_state.df_tariff_current, st.session_state.df_zones_current, st.session_state.erittely_data),
+            file_name="optimoinnin_raportti.xlsx",
             mime="application/vnd.ms-excel"
         )
 
@@ -545,6 +777,8 @@ if not edited_tariff.equals(st.session_state.df_tariff_current):
     
     st.session_state.df_tariff_current = edited_tariff.copy()
     st.session_state.lukitut_tariffit.update(muutokset)
+    # MUUTOS: Nollataan analyysidata, koska tariffit muuttuivat
+    st.session_state.df_tulokset_yksiloity = pd.DataFrame()
     st.info("Tariffimuutokset tallennettu. Ne lukitaan seuraavassa laskennassa.")
     st.rerun()
 
@@ -564,43 +798,29 @@ if st.session_state.lukitut_tariffit:
 st.subheader("Nykyinen vyöhykemalli")
 col1, col2 = st.columns([0.4, 0.6])
 with col1:
-    df_zones_display = st.session_state.df_zones_current.copy()
-    if COL_POSTITOIMIPAIKKA not in df_zones_display.columns:
-         df_zones_display = pd.merge(df_zones_display, st.session_state.sheets[SHEET_PNRO][[COL_POSTINUMERO, COL_POSTITOIMIPAIKKA]].astype(str), on=COL_POSTINUMERO, how='left')
+    # MUUTOS: Käytetään uutta, nopeaa funktiota datan valmisteluun
+    df_zones_display, df_map = valmistele_vyohykenakyma_data(st.session_state.df_zones_current, st.session_state.sheets)
     
-    if 'Rahtikirjojen_lkm' not in df_zones_display.columns:
-        df_keikat_temp = pd.concat([st.session_state.sheets[SHEET_JAKO], st.session_state.sheets[SHEET_NOUTO]], ignore_index=True)
-        df_keikat_temp[COL_POSTINUMERO] = df_keikat_temp[COL_POSTINUMERO].astype(str)
-        rk_lkm = df_keikat_temp.groupby(COL_POSTINUMERO)[COL_RAHTIKIRJA].nunique().reset_index(name='Rahtikirjojen_lkm')
-        df_zones_display[COL_POSTINUMERO] = df_zones_display[COL_POSTINUMERO].astype(str)
-        df_zones_display = pd.merge(df_zones_display, rk_lkm, on=COL_POSTINUMERO, how='left').fillna({'Rahtikirjojen_lkm': 0})
-    
-    display_cols = [COL_POSTINUMERO, COL_POSTITOIMIPAIKKA, COL_VYOHYKE, 'Rahtikirjojen_lkm']
-    for col in display_cols:
-        if col not in df_zones_display.columns: df_zones_display[col] = np.nan
-    df_zones_display['Rahtikirjojen_lkm'] = df_zones_display['Rahtikirjojen_lkm'].astype(int)
-
-    cols_to_show = [c for c in display_cols if c in df_zones_display.columns]
+    cols_to_show = [COL_POSTINUMERO, COL_POSTITOIMIPAIKKA, COL_VYOHYKE, 'Rahtikirjojen_lkm']
     edited_zones = st.data_editor(df_zones_display[cols_to_show], key="zones_editor", use_container_width=True, height=400, disabled=[COL_POSTITOIMIPAIKKA, 'Rahtikirjojen_lkm'])
     
     if not edited_zones.equals(df_zones_display[cols_to_show]):
-        merged_df = pd.merge(
-            st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]].rename(columns={COL_VYOHYKE: 'vanha_vyohyke'}),
-            edited_zones[[COL_POSTINUMERO, COL_VYOHYKE]].rename(columns={COL_VYOHYKE: 'uusi_vyohyke'}),
-            on=COL_POSTINUMERO, how='inner'
-        )
-        muuttuneet_rivit = merged_df[merged_df['vanha_vyohyke'].astype(str) != merged_df['uusi_vyohyke'].astype(str)]
-        
-        for _, row in muuttuneet_rivit.iterrows():
-            st.session_state.lukitut_vyohykkeet[row[COL_POSTINUMERO]] = row['uusi_vyohyke']
-        
-        vyohyke_updates = edited_zones.set_index(COL_POSTINUMERO)[COL_VYOHYKE]
-        df_to_update = st.session_state.df_zones_current.set_index(COL_POSTINUMERO)
-        df_to_update.update(vyohyke_updates)
-        st.session_state.df_zones_current = df_to_update.reset_index()
-        
-        st.info("Vyöhykemuutokset tallennettu. Ne lukitaan seuraavassa optimoinnissa.")
-        st.rerun()
+        # MUUTOS: Yksinkertaistettu logiikka muutosten tunnistamiseen
+        muuttuneet_rivit = df_zones_display[cols_to_show].compare(edited_zones)
+        if not muuttuneet_rivit.empty:
+            for idx in muuttuneet_rivit.index:
+                pnro = df_zones_display.loc[idx, COL_POSTINUMERO]
+                uusi_vyohyke = edited_zones.loc[idx, COL_VYOHYKE]
+                st.session_state.lukitut_vyohykkeet[pnro] = uusi_vyohyke
+            
+            vyohyke_updates = edited_zones.set_index(COL_POSTINUMERO)[COL_VYOHYKE]
+            df_to_update = st.session_state.df_zones_current.set_index(COL_POSTINUMERO)
+            df_to_update.update(vyohyke_updates)
+            st.session_state.df_zones_current = df_to_update.reset_index()
+            # MUUTOS: Nollataan analyysidata, koska vyöhykkeet muuttuivat
+            st.session_state.df_tulokset_yksiloity = pd.DataFrame()
+            st.info("Vyöhykemuutokset tallennettu. Ne lukitaan seuraavassa optimoinnissa.")
+            st.rerun()
 
     if st.session_state.lukitut_vyohykkeet:
         with st.expander(f"Aktiiviset vyöhykelukitukset ({len(st.session_state.lukitut_vyohykkeet)} kpl)"):
@@ -612,24 +832,17 @@ with col1:
                 with col_button:
                     if st.button("Poista", key=f"del_zone_{pnro}", use_container_width=True):
                         del st.session_state.lukitut_vyohykkeet[pnro]
-                        orig_pnro_df = st.session_state.sheets[SHEET_PNRO].astype({COL_POSTINUMERO: str})
+                        orig_pnro_df = st.session_state.sheets[SHEET_PNRO]
                         orig_row = orig_pnro_df[orig_pnro_df[COL_POSTINUMERO] == str(pnro)]
                         if not orig_row.empty:
                             orig_value = orig_row[COL_VYOHYKE].iloc[0]
-                            st.session_state.df_zones_current.loc[st.session_state.df_zones_current[COL_POSTINUMERO].astype(str) == str(pnro), COL_VYOHYKE] = orig_value
+                            st.session_state.df_zones_current.loc[st.session_state.df_zones_current[COL_POSTINUMERO] == str(pnro), COL_VYOHYKE] = orig_value
                         st.toast(f"Lukitus poistettu: {pnro}", icon="🔓")
                         st.rerun()
 
 with col2:
-    df_map = st.session_state.df_zones_current.copy()
-    df_map.replace('EILÖYDY', np.nan, inplace=True); df_map.dropna(subset=[COL_X_KOORD, COL_Y_KOORD, COL_VYOHYKE], inplace=True)
     if not df_map.empty:
         try:
-            transformer = Transformer.from_crs("EPSG:3067", "EPSG:4326", always_xy=True)
-            df_map['lon'], df_map['lat'] = transformer.transform(df_map[COL_X_KOORD].values, df_map[COL_Y_KOORD].values)
-            df_map[COL_VYOHYKE] = df_map[COL_VYOHYKE].astype(int)
-            colors = [[33, 150, 243, 160], [100, 181, 246, 160], [255, 235, 59, 160], [255, 193, 7, 160], [255, 87, 34, 160], [213, 0, 0, 160]]
-            df_map['color'] = df_map[COL_VYOHYKE].apply(lambda z: colors[min(z - 1, len(colors) - 1)])
             st.pydeck_chart(pdk.Deck(
                 map_provider="carto", map_style="light",
                 initial_view_state=pdk.ViewState(latitude=df_map['lat'].mean(), longitude=df_map['lon'].mean(), zoom=7, pitch=0),
@@ -639,29 +852,55 @@ with col2:
         except Exception as e: st.warning(f"Karttavisualisoinnin luonti epäonnistui: {e}")
     else: st.info("Ei näytettävää dataa kartalla.")
 
-if not st.session_state.vertailu_auto.empty:
-    st.header("Laskennan tulokset")
-    df_vertailu = st.session_state.vertailu_auto.copy()
-    df_orig_autot = st.session_state.sheets[SHEET_AUTOT][[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]]
-    df_vertailu = pd.merge(df_vertailu, df_orig_autot, on=COL_AUTOTUNNUS, how='left')
+if 'sheets' in st.session_state and st.session_state.sheets:
+    st.header("Analyysi ja tulokset")
+
+    # MUUTOS: Lasketaan analyysidata VAIN jos sitä ei ole jo laskettu
+    if st.session_state.df_tulokset_yksiloity.empty:
+        with st.spinner("Lasketaan analyysidataa..."):
+            autot_kaikki = st.session_state.sheets[SHEET_AUTOT][COL_AUTOTUNNUS]
+            _, df_tulokset = laske_analyysi_data(
+                st.session_state.sheets, 
+                st.session_state.df_zones_current, 
+                st.session_state.df_tariff_current,
+                tuple(autot_kaikki)
+            )
+            st.session_state.df_tulokset_yksiloity = df_tulokset
+    
+    # MUUTOS: Luodaan vertailutaulukko tallennetusta datasta
+    korjatut_summat = st.session_state.df_tulokset_yksiloity.groupby(COL_AUTOTUNNUS)['Uusi_nippu_hinta'].sum()
+    df_vertailu = st.session_state.sheets[SHEET_AUTOT][[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA, COL_VANHAT_KULUT]].copy()
+    df_vertailu.rename(columns={COL_VANHAT_KULUT: 'Vanha kustannus (€)'}, inplace=True)
+    df_vertailu['Uusi kustannus (€)'] = df_vertailu[COL_AUTOTUNNUS].map(korjatut_summat).fillna(0)
+
     df_vertailu['Erotus (€)'] = df_vertailu['Uusi kustannus (€)'] - df_vertailu['Vanha kustannus (€)']
-    df_vertailu['Erotus (%)'] = (df_vertailu['Vanha kustannus (€)'].replace(0, np.nan))
-    df_vertailu['Erotus (%)'] = df_vertailu['Erotus (€)'] / df_vertailu['Erotus (%)'] * 100
-    df_vertailu.fillna(0, inplace=True)
+    df_vertailu['Erotus (%)'] = (df_vertailu['Erotus (€)'] / df_vertailu['Vanha kustannus (€)'].replace(0, np.nan) * 100).fillna(0)
 
     st.subheader("Autojen valinta ja vertailu")
     df_vertailu['Mukana'] = df_vertailu[COL_AUTOTUNNUS].isin(list(st.session_state.df_autot_current[COL_AUTOTUNNUS]))
     
     display_cols_autot = ['Mukana', COL_AUTOTUNNUS, COL_LIIKENNOITSIJA, 'Vanha kustannus (€)', 'Uusi kustannus (€)', 'Erotus (€)', 'Erotus (%)']
-    edited_autot = st.data_editor(df_vertailu[display_cols_autot], key="autot_editor", hide_index=True, use_container_width=True)
-
-    autot_nyt_mukana = set(edited_autot[edited_autot['Mukana']][COL_AUTOTUNNUS])
-    autot_ennen = set(st.session_state.df_autot_current[COL_AUTOTUNNUS])
-    if autot_nyt_mukana != autot_ennen:
-        st.session_state.df_autot_current = st.session_state.sheets[SHEET_AUTOT][st.session_state.sheets[SHEET_AUTOT][COL_AUTOTUNNUS].isin(autot_nyt_mukana)].copy()
-        st.info("Autojen valinta on muuttunut. Aja haluamasi laskenta uudelleen päivittääksesi tulokset.")
     
-    df_naytettava = edited_autot[edited_autot['Mukana']]
+    st.data_editor(df_vertailu[display_cols_autot], key="autot_editor_state", hide_index=True, use_container_width=True)
+
+    if st.button("Päivitä autovalinnat"):
+        edited_rows = st.session_state.autot_editor_state.get('edited_rows', {})
+        autot_nyt_mukana = set(st.session_state.df_autot_current[COL_AUTOTUNNUS])
+
+        for idx, changes in edited_rows.items():
+            autotunnus = df_vertailu.iloc[int(idx)][COL_AUTOTUNNUS]
+            if 'Mukana' in changes:
+                if changes['Mukana']:
+                    autot_nyt_mukana.add(autotunnus)
+                else:
+                    autot_nyt_mukana.discard(autotunnus)
+        
+        st.session_state.df_autot_current = st.session_state.sheets[SHEET_AUTOT][st.session_state.sheets[SHEET_AUTOT][COL_AUTOTUNNUS].isin(autot_nyt_mukana)].copy()
+        st.toast("Autovalinnat päivitetty!", icon="🚗")
+        time.sleep(1)
+        st.rerun()
+
+    df_naytettava = df_vertailu[df_vertailu['Mukana']].copy()
     if not df_naytettava.empty:
         st.write("**Yhteenvedot (perustuen valittuihin autoihin):**")
         summa_auto = pd.DataFrame(df_naytettava[['Vanha kustannus (€)', 'Uusi kustannus (€)', 'Erotus (€)']].sum()).T
@@ -669,28 +908,17 @@ if not st.session_state.vertailu_auto.empty:
         st.dataframe(summa_auto.set_index(COL_AUTOTUNNUS).style.format("{:,.2f} €"), use_container_width=True)
         st.subheader("Liikennöitsijäkohtainen yhteenveto")
         df_liikenne = df_naytettava.groupby(COL_LIIKENNOITSIJA)[['Vanha kustannus (€)', 'Uusi kustannus (€)', 'Erotus (€)']].sum().reset_index()
-        df_liikenne['Erotus (%)'] = (df_liikenne['Vanha kustannus (€)'].replace(0, np.nan))
-        df_liikenne['Erotus (%)'] = df_liikenne['Erotus (€)'] / df_liikenne['Erotus (%)'] * 100
-        df_liikenne.fillna(0, inplace=True)
+        df_liikenne['Erotus (%)'] = (df_liikenne['Erotus (€)'] / df_liikenne['Vanha kustannus (€)'].replace(0, np.nan) * 100).fillna(0)
         st.dataframe(df_liikenne, hide_index=True, use_container_width=True)
         
         st.markdown("---")
-        st.header("Porautumisanalyysi")
+        st.header("Porautumisanalyysi")        
 
-        _, df_niput_base, _ = _valmistele_data(st.session_state.sheets, list(autot_nyt_mukana))
-        df_niput_tulokset = pd.merge(df_niput_base, st.session_state.df_zones_current[[COL_POSTINUMERO, COL_VYOHYKE]], on=COL_POSTINUMERO, how='inner')
-        df_niput_tulokset = pd.merge(df_niput_tulokset, df_naytettava[[COL_AUTOTUNNUS, COL_LIIKENNOITSIJA]], on=COL_AUTOTUNNUS, how='left')
-        df_niput_tulokset['tariffi_rivi_idx'] = df_niput_tulokset['nippu_paino'].apply(lambda p: get_painoluokka_rivi_idx(p, st.session_state.sheets[SHEET_TARIFFI]))
-        df_niput_tulokset.dropna(subset=['tariffi_rivi_idx'], inplace=True)
-        df_niput_tulokset[COL_VYOHYKE] = pd.to_numeric(df_niput_tulokset[COL_VYOHYKE], errors='coerce').fillna(0).astype(int)
-        valid_vyohykkeet = {int(c.split(' ')[1]) for c in st.session_state.df_tariff_current.columns if PREFIX_VYOHYKE_COL in c}
-        df_niput_tulokset = df_niput_tulokset[df_niput_tulokset[COL_VYOHYKE].isin(valid_vyohykkeet)]
-
-        if not df_niput_tulokset.empty:
-            df_niput_tulokset['Uusi_nippu_hinta'] = df_niput_tulokset.apply(
-                lambda r: r['nippu_paino'] * st.session_state.df_tariff_current.at[int(r['tariffi_rivi_idx']), f"{PREFIX_VYOHYKE_COL} {r[COL_VYOHYKE]}"] 
-                if st.session_state.sheets[SHEET_TARIFFI].at[int(r['tariffi_rivi_idx']), COL_LASKENTATAPA] == LASKENTATAPA_KG 
-                else st.session_state.df_tariff_current.at[int(r['tariffi_rivi_idx']), f"{PREFIX_VYOHYKE_COL} {r[COL_VYOHYKE]}"], axis=1)
+        # MUUTOS: Käytetään suoraan olemassa olevaa, välimuistitettua dataa. Ei lasketa mitään uudestaan.
+        autot_nyt_mukana = set(df_naytettava[COL_AUTOTUNNUS])
+        df_analyysi_data = st.session_state.df_tulokset_yksiloity[
+            st.session_state.df_tulokset_yksiloity[COL_AUTOTUNNUS].isin(autot_nyt_mukana)
+        ].copy()
 
         col1_drill, col2_drill = st.columns(2)
         with col1_drill:
@@ -701,11 +929,11 @@ if not st.session_state.vertailu_auto.empty:
             valittu_auto = st.selectbox("Valitse auto", auto_lista)
 
         if valittu_liik != "Valitse...":
-            data_filt = df_niput_tulokset[df_niput_tulokset[COL_LIIKENNOITSIJA] == valittu_liik]
+            data_filt = df_analyysi_data[df_analyysi_data[COL_LIIKENNOITSIJA] == valittu_liik]
             vanha_kustannus = df_liikenne[df_liikenne[COL_LIIKENNOITSIJA] == valittu_liik]['Vanha kustannus (€)'].sum()
-            nayta_porautumisanalyysi(data_filt, vanha_kustannus, valittu_liik)
+            nayta_porautumisanalyysi(data_filt, vanha_kustannus, valittu_liik, st.session_state.sheets[SHEET_TARIFFI])
         
         elif valittu_auto != "Valitse...":
-            data_filt = df_niput_tulokset[df_niput_tulokset[COL_AUTOTUNNUS] == valittu_auto]
+            data_filt = df_analyysi_data[df_analyysi_data[COL_AUTOTUNNUS] == valittu_auto]
             vanha_kustannus = df_naytettava[df_naytettava[COL_AUTOTUNNUS] == valittu_auto]['Vanha kustannus (€)'].sum()
-            nayta_porautumisanalyysi(data_filt, vanha_kustannus, valittu_auto)
+            nayta_porautumisanalyysi(data_filt, vanha_kustannus, valittu_auto, st.session_state.sheets[SHEET_TARIFFI])
